@@ -28,6 +28,8 @@ const EstacionesANH       = lazy(() => import("./pages/anh/Estaciones"));
 const ReportesANH         = lazy(() => import("./pages/anh/Reportes"));
 const GestionUsuarios = lazy(() => import("./pages/admin/GestionUsuarios"));
 const RegistrarConsumidor = lazy(() => import("./pages/admin/RegistrarConsumidor"));
+const EstacionesDepartamento = lazy(() => import("./pages/anh/EstacionesDepartamento"));
+const EstacionesProvincia    = lazy(() => import("./pages/anh/EstacionesProvincia"));
 // Páginas ESS
 const SolicitudesESS      = lazy(() => import("./pages/estacion/Solicitudes"));
 
@@ -172,6 +174,20 @@ function AppRoutes() {
               <RegistrarConsumidor />
             </ProtectedRoute>
           }
+        />
+        <Route path="/anh/estaciones/departamento/:deptoId"
+          element={
+            <ProtectedRoute allowedRoles={["ANH", "ADMIN"]}>
+              <EstacionesDepartamento />
+            </ProtectedRoute>
+         }
+        />
+        <Route path="/anh/estaciones/departamento/:deptoId/provincia/:provId"
+          element={
+            <ProtectedRoute allowedRoles={["ANH", "ADMIN"]}>
+              <EstacionesProvincia />
+            </ProtectedRoute>
+        }
         />
 
         {/* ---- FALLBACK ---- */}

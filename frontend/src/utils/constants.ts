@@ -10,10 +10,26 @@ export const ESTADOS_SOLICITUD: Record<string, { label: string; color: string }>
   EXPIRADA:   { label: "Expirada",   color: "bg-gray-100 text-gray-500"    },
 };
 
+// ------------------------------------------------
+// Mismo criterio de color que ESTADOS_SOLICITUD, pero en HEX.
+// Se usa exclusivamente donde no se puede aplicar una clase Tailwind
+// directamente (ej. props `fill`/`stroke` de Recharts).
+// Si cambias un color aquí, cambia también el equivalente arriba.
+// ------------------------------------------------
+export const ESTADOS_SOLICITUD_HEX: Record<string, string> = {
+  PENDIENTE:  "#F59E0B",
+  OBSERVADA:  "#F97316",
+  APROBADA:   "#10B981",
+  DESPACHADA: "#3B82F6",
+  RECHAZADA:  "#EF4444",
+  CANCELADA:  "#94A3B8",
+  EXPIRADA:   "#9CA3AF",
+};
+
 export const COMBUSTIBLES: Record<string, string> = {
   GASOLINA: "Gasolina",
   DIESEL:   "Diésel",
-  
+
 };
 
 export const ACTIVIDADES: Record<string, string> = {

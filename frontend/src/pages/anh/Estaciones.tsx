@@ -1,36 +1,42 @@
 // src/pages/anh/Estaciones.tsx
+// Nivel 1: Tarjetas de departamentos con conteo de estaciones
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import Layout from "../../components/Layout";
 import { estacionesService } from "../../services/estaciones.service";
 import { catalogosService } from "../../services/catalogos.service";
 import type { EstacionServicio, EstadoEstacion } from "../../types/estacion.types";
-import { Building2, Plus, Search, RefreshCw, AlertCircle, CheckCircle, X, Edit2 } from "lucide-react";
-
-const ESTADOS: { value: EstadoEstacion | ""; label: string }[] = [
-  { value: "",           label: "Todos" },
-  { value: "ACTIVA",     label: "Activa" },
-  { value: "INACTIVA",   label: "Inactiva" },
-  { value: "SUSPENDIDA", label: "Suspendida" },
-];
-
-const estadoColor: Record<string, string> = {
-  ACTIVA:     "bg-state-success-bg text-state-success-fg",
-  INACTIVA:   "bg-background text-muted-foreground",
-  SUSPENDIDA: "bg-red-100 text-red-600",
-};
+import { Card, CardBody } from "../../components/ui/Card";
+import { Button } from "../../components/ui/Button";
+import { Alert } from "../../components/ui/Alert";
+import { Spinner } from "../../components/ui/Spinner";
+import { Modal } from "../../components/ui/Modal";
+import {
+  Building2, Plus, Search, RefreshCw, ArrowRight,
+  CheckCircle, MapPin,
+} from "lucide-react";
 
 interface Depto { id: number; nombre: string; }
 interface Prov  { id: number; nombre: string; }
 interface Muni  { id: number; nombre: string; }
 
+interface DeptStats {
+  id: number;
+  nombre: string;
+  total: number;
+  activas: number;
+  inactivas: number;
+  suspendidas: number;
+}
+
 export default function EstacionesANH() {
-  const [estaciones,    setEstaciones]    = useState<EstacionServicio[]>([]);
-  const [loading,       setLoading]       = useState(true);
-  const [error,         setError]         = useState("");
-  const [exito,         setExito]         = useState("");
-  const [busqueda,      setBusqueda]      = useState("");
-  const [filtroEstado,  setFiltroEstado]  = useState<EstadoEstacion | "">("");
+  const navigate = useNavigate();
+
+  const [estaciones, setEstaciones] = useState<EstacionServicio[]>([]);
+  const [loading,    setLoading]    = useState(true);
+  const [alerta,     setAlerta]     = useState<{ type: "error" | "success"; message: string } | null>(null);
+  const [busqueda,   setBusqueda]   = useState("");
 
   const [deptos, setDeptos] = useState<Depto[]>([]);
   const [provs,  setProvs]  = useState<Prov[]>([]);
@@ -38,48 +44,78 @@ export default function EstacionesANH() {
   const [loadingCatalogo, setLoadingCatalogo] = useState(false);
 
   const [modal,     setModal]     = useState(false);
-  const [editando,  setEditando]  = useState<EstacionServicio | null>(null);
   const [guardando, setGuardando] = useState(false);
+  const [errorForm, setErrorForm] = useState("");
   const [form, setForm] = useState({
-    nombre:    "",
-    codigo:    "",
-    direccion: "",
-    deptoId:   0,
-    provId:    0,
-    muniId:    0,
-    estado:    "ACTIVA" as EstadoEstacion,
+    nombre: "", codigo: "", direccion: "",
+    deptoId: 0, provId: 0, muniId: 0,
+    estado: "ACTIVA" as EstadoEstacion,
   });
 
   const cargar = async () => {
-    setLoading(true); setError("");
+    setLoading(true);
     try {
-      const params: Record<string, string> = {};
-      if (filtroEstado) params.estado = filtroEstado;
-      if (busqueda)     params.search = busqueda;
-      const data = await estacionesService.getAll(params);
-      setEstaciones(Array.isArray(data) ? data : (data as any).results ?? []);
+      const data = await estacionesService.getTodas();
+      setEstaciones(data);
     } catch {
-      setError("Error al cargar las estaciones.");
-    } finally { setLoading(false); }
+      setAlerta({ type: "error", message: "Error al cargar las estaciones." });
+    } finally {
+      setLoading(false);
+    }
   };
 
+  useEffect(() => { cargar(); }, []);
+
   useEffect(() => {
-    catalogosService.getDepartamentos()
-      .then(setDeptos)
-      .catch(() => {});
+    catalogosService.getDepartamentos().then(setDeptos).catch(() => {});
   }, []);
 
-  useEffect(() => { cargar(); }, [filtroEstado]);
+  // Agrupar por departamento con conteos
+  const departamentos = useMemo((): DeptStats[] => {
+    const mapa = new Map<number, DeptStats>();
 
+    deptos.forEach(d => {
+      mapa.set(d.id, { id: d.id, nombre: d.nombre, total: 0, activas: 0, inactivas: 0, suspendidas: 0 });
+    });
+
+    const lista = busqueda
+      ? estaciones.filter(e => {
+          const q = busqueda.toLowerCase();
+          return (
+            e.nombre.toLowerCase().includes(q) ||
+            e.codigo.toLowerCase().includes(q) ||
+            e.municipio_nombre.toLowerCase().includes(q) ||
+            e.departamento_nombre.toLowerCase().includes(q)
+          );
+        })
+      : estaciones;
+
+    lista.forEach(e => {
+      if (!mapa.has(e.departamento_id)) {
+        mapa.set(e.departamento_id, {
+          id: e.departamento_id, nombre: e.departamento_nombre,
+          total: 0, activas: 0, inactivas: 0, suspendidas: 0,
+        });
+      }
+      const dept = mapa.get(e.departamento_id)!;
+      dept.total++;
+      if (e.estado === "ACTIVA")     dept.activas++;
+      if (e.estado === "INACTIVA")   dept.inactivas++;
+      if (e.estado === "SUSPENDIDA") dept.suspendidas++;
+    });
+
+    const result = [...mapa.values()].sort((a, b) => a.nombre.localeCompare(b.nombre));
+    return busqueda ? result.filter(d => d.total > 0) : result;
+  }, [estaciones, deptos, busqueda]);
+
+  // Cascada del modal
   const onDeptoChange = async (deptoId: number) => {
     setForm(f => ({ ...f, deptoId, provId: 0, muniId: 0 }));
     setProvs([]); setMunis([]);
     if (!deptoId) return;
     setLoadingCatalogo(true);
-    try {
-      const data = await catalogosService.getProvincias(deptoId);
-      setProvs(data);
-    } finally { setLoadingCatalogo(false); }
+    try { setProvs(await catalogosService.getProvincias(deptoId)); }
+    finally { setLoadingCatalogo(false); }
   };
 
   const onProvChange = async (provId: number) => {
@@ -87,88 +123,40 @@ export default function EstacionesANH() {
     setMunis([]);
     if (!provId) return;
     setLoadingCatalogo(true);
-    try {
-      const data = await catalogosService.getMunicipios(provId);
-      setMunis(data);
-    } finally { setLoadingCatalogo(false); }
+    try { setMunis(await catalogosService.getMunicipios(provId)); }
+    finally { setLoadingCatalogo(false); }
   };
 
   const abrirCrear = () => {
-    setEditando(null);
+    setErrorForm("");
     setForm({ nombre: "", codigo: "", direccion: "", deptoId: 0, provId: 0, muniId: 0, estado: "ACTIVA" });
     setProvs([]); setMunis([]);
     setModal(true);
   };
 
-  const abrirEditar = async (e: EstacionServicio) => {
-    setEditando(e);
-    setForm({
-      nombre:    e.nombre,
-      codigo:    e.codigo,
-      direccion: e.direccion,
-      deptoId:   e.departamento_id,
-      provId:    e.provincia_id,
-      muniId:    e.municipio,
-      estado:    e.estado,
-    });
-    setModal(true);
-
-    setLoadingCatalogo(true);
-    try {
-      const provincias = await catalogosService.getProvincias(e.departamento_id);
-      setProvs(provincias);
-      const municipios = await catalogosService.getMunicipios(e.provincia_id);
-      setMunis(municipios);
-    } finally {
-      setLoadingCatalogo(false);
-    }
-  };
-
   const guardar = async () => {
     if (!form.nombre || !form.codigo || !form.direccion || !form.muniId) {
-      setError("Completa todos los campos obligatorios.");
+      setErrorForm("Completa todos los campos obligatorios.");
       return;
     }
-    setGuardando(true); setError("");
+    setGuardando(true); setErrorForm("");
     try {
-      const payload = {
-        nombre:    form.nombre,
-        codigo:    form.codigo,
-        direccion: form.direccion,
-        municipio: form.muniId,
-        estado:    form.estado,
-      };
-      if (editando) {
-        await estacionesService.actualizar(editando.id, payload);
-        setExito("Estación actualizada correctamente.");
-      } else {
-        await estacionesService.crear(payload);
-        setExito("Estación creada correctamente.");
-      }
+      await estacionesService.crear({
+        nombre: form.nombre, codigo: form.codigo, direccion: form.direccion,
+        municipio: form.muniId, estado: form.estado,
+      });
+      setAlerta({ type: "success", message: "Estación creada correctamente." });
       setModal(false);
       await cargar();
     } catch (err: unknown) {
       const e = err as { response?: { data?: Record<string, string[]> } };
       const data = e.response?.data;
       if (data) {
-        const msgs = Object.entries(data)
-          .map(([k, v]) => `${k}: ${Array.isArray(v) ? v[0] : v}`)
-          .join(" | ");
-        setError(msgs);
+        setErrorForm(Object.entries(data).map(([k, v]) => `${k}: ${Array.isArray(v) ? v[0] : v}`).join(" | "));
       } else {
-        setError("Error al guardar la estación.");
+        setErrorForm("Error al guardar la estación.");
       }
     } finally { setGuardando(false); }
-  };
-
-  const cambiarEstado = async (id: number, estado: EstadoEstacion) => {
-    try {
-      await estacionesService.cambiarEstado(id, estado);
-      setExito(`Estado cambiado a ${estado}.`);
-      await cargar();
-    } catch {
-      setError("Error al cambiar el estado.");
-    }
   };
 
   const inputCls = "w-full px-4 py-2.5 rounded-xl border border-border text-sm bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card outline-none";
@@ -185,199 +173,132 @@ export default function EstacionesANH() {
             </div>
             <div>
               <h1 className="text-2xl font-bold text-foreground">Estaciones</h1>
-              <p className="text-muted-foreground text-sm">{estaciones.length} estaciones registradas</p>
+              <p className="text-muted-foreground text-sm">{estaciones.length} estaciones en {deptos.length} departamentos</p>
             </div>
           </div>
           <div className="flex gap-2">
-            <button onClick={cargar} className="flex items-center gap-2 px-4 py-2 border border-border text-muted-foreground rounded-xl text-sm hover:bg-card transition-colors">
-              <RefreshCw className="w-4 h-4" />
-            </button>
-            <button onClick={abrirCrear} className="flex items-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary-hover transition-colors">
-              <Plus className="w-4 h-4" /> Nueva estación
-            </button>
+            <Button variant="outline" icon={<RefreshCw className="w-4 h-4" />} onClick={cargar}>
+              <span className="sr-only">Actualizar</span>
+            </Button>
+            <Button variant="primary" icon={<Plus className="w-4 h-4" />} onClick={abrirCrear}>
+              Nueva estación
+            </Button>
           </div>
         </div>
 
-        {/* ALERTAS */}
-        {error && !modal && (
-          <div className="flex items-center gap-3 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
-            <AlertCircle className="w-4 h-4 shrink-0" /> {error}
-          </div>
-        )}
-        {exito && (
-          <div className="flex items-center gap-3 bg-state-success-bg border border-state-success-fg/20 text-state-success-fg rounded-xl px-4 py-3 text-sm">
-            <CheckCircle className="w-4 h-4 shrink-0" /> {exito}
-          </div>
-        )}
+        {alerta && <Alert type={alerta.type} message={alerta.message} />}
 
-        {/* FILTROS */}
-        <div className="bg-card rounded-2xl border border-border shadow-sm p-4 flex gap-3 flex-wrap">
-          <div className="relative flex-1 min-w-48">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <input
-              value={busqueda}
-              onChange={e => setBusqueda(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && cargar()}
-              placeholder="Buscar estación..."
-              className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-border text-sm bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card outline-none"
-            />
-          </div>
-          <select value={filtroEstado} onChange={e => setFiltroEstado(e.target.value as EstadoEstacion | "")}
-            className="px-3 py-2.5 rounded-xl border border-border text-sm bg-input outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
-            {ESTADOS.map(e => <option key={e.value} value={e.value}>{e.label}</option>)}
-          </select>
-        </div>
+        {/* BÚSQUEDA */}
+        <Card>
+          <CardBody className="p-4">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+              <input
+                value={busqueda}
+                onChange={e => setBusqueda(e.target.value)}
+                placeholder="Buscar por nombre, código o municipio..."
+                className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-border text-sm bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card outline-none"
+              />
+            </div>
+          </CardBody>
+        </Card>
 
-        {/* GRID */}
+        {/* TARJETAS DE DEPARTAMENTOS */}
         {loading ? (
-          <div className="flex items-center justify-center py-16">
-            <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
-          </div>
-        ) : estaciones.length === 0 ? (
-          <div className="bg-card rounded-2xl border border-border shadow-sm text-center py-16">
-            <Building2 className="w-12 h-12 text-border mx-auto mb-3" />
-            <p className="text-muted-foreground text-sm">No se encontraron estaciones</p>
-          </div>
+          <div className="flex items-center justify-center py-16"><Spinner size="lg" /></div>
+        ) : departamentos.length === 0 ? (
+          <Card>
+            <CardBody className="text-center py-16">
+              <Building2 className="w-12 h-12 text-border mx-auto mb-3" />
+              <p className="text-foreground font-medium mb-1">Sin resultados</p>
+              <p className="text-muted-foreground text-sm">No se encontraron estaciones para esta búsqueda.</p>
+            </CardBody>
+          </Card>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {estaciones.map(e => (
-              <div key={e.id} className="bg-card rounded-2xl border border-border shadow-sm overflow-hidden">
-                <div className="px-5 py-4 border-b border-border flex items-start justify-between">
-                  <div>
-                    <p className="font-semibold text-foreground text-sm">{e.nombre}</p>
-                    <p className="text-xs text-muted-foreground font-mono">{e.codigo}</p>
+            {departamentos.map(dept => (
+              <button
+                key={dept.id}
+                onClick={() => navigate(`/anh/estaciones/departamento/${dept.id}`)}
+                className={`group w-full text-left bg-card rounded-xl border border-border shadow-sm overflow-hidden
+                  transition-all duration-150 hover:-translate-y-0.5 hover:shadow-md
+                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40
+                  ${dept.total === 0 ? "opacity-60" : ""}`}
+              >
+                <div className="px-5 py-4">
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+                      <MapPin className="w-5 h-5 text-primary" />
+                    </div>
+                    <ArrowRight className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                   </div>
-                  <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${estadoColor[e.estado] ?? "bg-background text-muted-foreground"}`}>
-                    {e.estado}
-                  </span>
+                  <p className="text-lg font-bold text-foreground mb-1">{dept.nombre}</p>
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                    {dept.total} {dept.total === 1 ? "estación" : "estaciones"}
+                  </p>
                 </div>
-                <div className="px-5 py-3 space-y-1">
-                  <p className="text-xs text-muted-foreground">{e.departamento_nombre} — {e.municipio_nombre}</p>
-                  <p className="text-xs text-muted-foreground truncate">{e.direccion}</p>
-                </div>
-                <div className="px-5 py-3 border-t border-border flex gap-2 flex-wrap">
-                  <button onClick={() => abrirEditar(e)} className="flex items-center gap-1.5 px-3 py-1.5 bg-background text-muted-foreground rounded-lg text-xs font-medium hover:bg-border transition-colors">
-                    <Edit2 className="w-3.5 h-3.5" /> Editar
-                  </button>
-                  {e.estado !== "ACTIVA" && (
-                    <button onClick={() => cambiarEstado(e.id, "ACTIVA")} className="px-3 py-1.5 bg-state-success-bg text-state-success-fg rounded-lg text-xs font-medium hover:opacity-90 transition-opacity">Activar</button>
-                  )}
-                  {e.estado !== "INACTIVA" && (
-                    <button onClick={() => cambiarEstado(e.id, "INACTIVA")} className="px-3 py-1.5 bg-background text-muted-foreground rounded-lg text-xs font-medium hover:bg-border transition-colors">Desactivar</button>
-                  )}
-                  {e.estado !== "SUSPENDIDA" && (
-                    <button onClick={() => cambiarEstado(e.id, "SUSPENDIDA")} className="px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-xs font-medium hover:bg-red-100 transition-colors">Suspender</button>
-                  )}
-                </div>
-              </div>
+                {dept.total > 0 && (
+                  <div className="px-5 py-3 border-t border-border flex gap-3">
+                    {dept.activas > 0 && (
+                      <span className="text-xs font-medium text-state-success-fg">{dept.activas} activa{dept.activas !== 1 ? "s" : ""}</span>
+                    )}
+                    {dept.inactivas > 0 && (
+                      <span className="text-xs font-medium text-muted-foreground">{dept.inactivas} inactiva{dept.inactivas !== 1 ? "s" : ""}</span>
+                    )}
+                    {dept.suspendidas > 0 && (
+                      <span className="text-xs font-medium text-red-600">{dept.suspendidas} suspendida{dept.suspendidas !== 1 ? "s" : ""}</span>
+                    )}
+                  </div>
+                )}
+              </button>
             ))}
           </div>
         )}
       </div>
 
-      {/* MODAL */}
-      {modal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setModal(false)} />
-          <div className="relative bg-card rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-border sticky top-0 bg-card">
-              <h3 className="font-semibold text-foreground">
-                {editando ? "Editar estación" : "Nueva estación"}
-              </h3>
-              <button onClick={() => setModal(false)} className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-background transition-colors">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="px-6 py-5 space-y-4">
-
-              {error && (
-                <div className="flex items-center gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-3 py-2 text-xs">
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0" /> {error}
-                </div>
-              )}
-
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">Nombre *</label>
-                <input value={form.nombre} onChange={e => setForm(f => ({ ...f, nombre: e.target.value }))} className={inputCls} placeholder="Nombre de la estación" />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">Código *</label>
-                <input value={form.codigo} onChange={e => setForm(f => ({ ...f, codigo: e.target.value }))} className={inputCls} placeholder="Ej: EST-001" />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">Departamento *</label>
-                <select
-                  value={form.deptoId}
-                  onChange={e => onDeptoChange(Number(e.target.value))}
-                  className={inputCls}
-                >
-                  <option value={0}>Seleccionar departamento...</option>
-                  {deptos.map(d => <option key={d.id} value={d.id}>{d.nombre}</option>)}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">Provincia *</label>
-                <select
-                  value={form.provId}
-                  onChange={e => onProvChange(Number(e.target.value))}
-                  disabled={!form.deptoId || loadingCatalogo}
-                  className={inputCls + " disabled:opacity-50"}
-                >
-                  <option value={0}>
-                    {loadingCatalogo ? "Cargando..." : "Seleccionar provincia..."}
-                  </option>
-                  {provs.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">Municipio *</label>
-                <select
-                  value={form.muniId}
-                  onChange={e => setForm(f => ({ ...f, muniId: Number(e.target.value) }))}
-                  disabled={!form.provId || loadingCatalogo}
-                  className={inputCls + " disabled:opacity-50"}
-                >
-                  <option value={0}>
-                    {loadingCatalogo ? "Cargando..." : "Seleccionar municipio..."}
-                  </option>
-                  {munis.map(m => <option key={m.id} value={m.id}>{m.nombre}</option>)}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">Dirección *</label>
-                <input value={form.direccion} onChange={e => setForm(f => ({ ...f, direccion: e.target.value }))} className={inputCls} placeholder="Dirección completa" />
-              </div>
-
-              {editando && (
-                <div>
-                  <label className="block text-xs font-medium text-muted-foreground mb-1">Estado</label>
-                  <select value={form.estado} onChange={e => setForm(f => ({ ...f, estado: e.target.value as EstadoEstacion }))} className={inputCls}>
-                    <option value="ACTIVA">Activa</option>
-                    <option value="INACTIVA">Inactiva</option>
-                    <option value="SUSPENDIDA">Suspendida</option>
-                  </select>
-                </div>
-              )}
-            </div>
-
-            <div className="px-6 py-4 border-t border-border flex justify-end gap-3 sticky bottom-0 bg-card">
-              <button onClick={() => setModal(false)} className="px-4 py-2 border border-border text-muted-foreground rounded-xl text-sm hover:bg-background transition-colors">
-                Cancelar
-              </button>
-              <button onClick={guardar} disabled={guardando} className="flex items-center gap-2 px-5 py-2 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary-hover disabled:bg-slate-300 transition-colors">
-                {guardando ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-                {editando ? "Actualizar" : "Crear estación"}
-              </button>
-            </div>
+      {/* MODAL CREAR */}
+      <Modal open={modal} onClose={() => setModal(false)} title="Nueva estación" size="lg">
+        <div className="space-y-4">
+          {errorForm && <Alert type="error" message={errorForm} />}
+          <div>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">Nombre *</label>
+            <input value={form.nombre} onChange={e => setForm(f => ({ ...f, nombre: e.target.value }))} className={inputCls} placeholder="Nombre de la estación" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">Código *</label>
+            <input value={form.codigo} onChange={e => setForm(f => ({ ...f, codigo: e.target.value }))} className={inputCls} placeholder="Ej: EST-001" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">Departamento *</label>
+            <select value={form.deptoId} onChange={e => onDeptoChange(Number(e.target.value))} className={inputCls}>
+              <option value={0}>Seleccionar departamento...</option>
+              {deptos.map(d => <option key={d.id} value={d.id}>{d.nombre}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">Provincia *</label>
+            <select value={form.provId} onChange={e => onProvChange(Number(e.target.value))} disabled={!form.deptoId || loadingCatalogo} className={inputCls + " disabled:opacity-50"}>
+              <option value={0}>{loadingCatalogo ? "Cargando..." : "Seleccionar provincia..."}</option>
+              {provs.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">Municipio *</label>
+            <select value={form.muniId} onChange={e => setForm(f => ({ ...f, muniId: Number(e.target.value) }))} disabled={!form.provId || loadingCatalogo} className={inputCls + " disabled:opacity-50"}>
+              <option value={0}>{loadingCatalogo ? "Cargando..." : "Seleccionar municipio..."}</option>
+              {munis.map(m => <option key={m.id} value={m.id}>{m.nombre}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">Dirección *</label>
+            <input value={form.direccion} onChange={e => setForm(f => ({ ...f, direccion: e.target.value }))} className={inputCls} placeholder="Dirección completa" />
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <Button variant="outline" onClick={() => setModal(false)}>Cancelar</Button>
+            <Button variant="primary" icon={<CheckCircle className="w-4 h-4" />} loading={guardando} onClick={guardar}>Crear estación</Button>
           </div>
         </div>
-      )}
+      </Modal>
     </Layout>
   );
 }

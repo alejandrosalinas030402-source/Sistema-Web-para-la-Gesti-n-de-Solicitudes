@@ -1,17 +1,23 @@
 // src/pages/anh/DetalleConsumidor.tsx
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import Layout from "../../components/Layout";
-import { EstadoSolicitudBadge, AlertaBadge } from "../../components/ui/EstadoBadge";
+import { Card, CardHeader, CardBody } from "../../components/ui/Card";
+import { Button } from "../../components/ui/Button";
+import { Alert } from "../../components/ui/Alert";
+import { Spinner } from "../../components/ui/Spinner";
+import { EstadoIdentidadBadge, AlertaBadge } from "../../components/ui/EstadoBadge";
 import { consumidoresService } from "../../services/consumidores.service";
 import type { ConsumidorPerfil } from "../../types/consumidor.types";
 import { ACTIVIDADES } from "../../utils/constants";
 import { formatFecha } from "../../utils/format";
 import {
-  ArrowLeft, User, MapPin, Briefcase, Shield,
-  FileImage, AlertCircle, CheckCircle, ShieldAlert, ShieldOff
+  ArrowLeft, User, MapPin, Shield,
+  FileImage, AlertCircle, CheckCircle, ShieldAlert, ShieldOff,
 } from "lucide-react";
+
+const ALERT_TIMEOUT = 4000;
 
 function Dato({ label, value }: { label: string; value: string | number | null | undefined }) {
   return (
@@ -23,18 +29,31 @@ function Dato({ label, value }: { label: string; value: string | number | null |
 }
 
 export default function DetalleConsumidor() {
-  const { id }    = useParams<{ id: string }>();
-  const navigate  = useNavigate();
+  const { id }   = useParams<{ id: string }>();
+  const navigate = useNavigate();
 
   const [perfil,     setPerfil]     = useState<ConsumidorPerfil | null>(null);
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState("");
-  const [exito,      setExito]      = useState("");
   const [procesando, setProcesando] = useState(false);
 
+  // Alertas con auto-dismiss
+  const [alerta, setAlertaMsg] = useState<{ type: "error" | "success"; message: string } | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flash = (type: "error" | "success", message: string) => {
+    setAlertaMsg({ type, message });
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setAlertaMsg(null), ALERT_TIMEOUT);
+  };
+
+  // Motivos separados para identidad y alerta (antes compartían
+  // el mismo estado, lo cual era un bug si ambos estaban abiertos).
   const [accionIdentidad, setAccionIdentidad] = useState<string | null>(null);
-  const [accionAlerta,    setAccionAlerta]    = useState<string | null>(null);
-  const [motivo,          setMotivo]          = useState("");
+  const [motivoIdentidad, setMotivoIdentidad] = useState("");
+
+  const [accionAlerta, setAccionAlerta] = useState<string | null>(null);
+  const [motivoAlerta, setMotivoAlerta] = useState("");
 
   useEffect(() => {
     if (!id) return;
@@ -46,56 +65,56 @@ export default function DetalleConsumidor() {
 
   const cambiarIdentidad = async (estado: string) => {
     if (!perfil) return;
-    setProcesando(true); setError("");
+    setProcesando(true);
     try {
       const p = await consumidoresService.verificarIdentidad(perfil.id, {
         estado_identidad: estado,
-        observacion:      motivo,
+        observacion: motivoIdentidad,
       });
       setPerfil(p);
       setAccionIdentidad(null);
-      setMotivo("");
-      setExito(`Estado de identidad actualizado a: ${estado}`);
+      setMotivoIdentidad("");
+      flash("success", `Estado de identidad actualizado a: ${estado}`);
     } catch {
-      setError("Error al cambiar el estado de identidad.");
+      flash("error", "Error al cambiar el estado de identidad.");
     } finally { setProcesando(false); }
   };
 
-  const cambiarAlerta = async (alerta: string) => {
+  const cambiarAlerta = async (alertaVal: string) => {
     if (!perfil) return;
-    setProcesando(true); setError("");
+    setProcesando(true);
     try {
       const p = await consumidoresService.cambiarAlerta(perfil.id, {
-        alerta_repetitividad: alerta,
-        motivo,
+        alerta_repetitividad: alertaVal,
+        motivo: motivoAlerta,
       });
       setPerfil(p);
       setAccionAlerta(null);
-      setMotivo("");
-      setExito(`Alerta actualizada a: ${alerta}`);
+      setMotivoAlerta("");
+      flash("success", `Alerta actualizada a: ${alertaVal}`);
     } catch {
-      setError("Error al cambiar la alerta.");
+      flash("error", "Error al cambiar la alerta.");
     } finally { setProcesando(false); }
   };
+
+  const textareaCls = "w-full px-4 py-2.5 rounded-xl border border-border text-sm bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card outline-none resize-none";
 
   if (loading) return (
     <Layout>
       <div className="flex items-center justify-center min-h-[60vh]">
-        <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+        <Spinner size="lg" />
       </div>
     </Layout>
   );
 
   if (!perfil) return (
     <Layout>
-      <div className="text-center py-16">
-        <AlertCircle className="w-12 h-12 text-red-400 mx-auto mb-3" />
-        <p className="text-muted-foreground">{error || "Consumidor no encontrado."}</p>
+      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4 max-w-md mx-auto text-center">
+        <Alert type="error" message={error || "Consumidor no encontrado."} />
+        <Button variant="outline" onClick={() => navigate(-1)}>Volver</Button>
       </div>
     </Layout>
   );
-
-  const textareaCls = "w-full px-4 py-2.5 rounded-xl border border-border text-sm bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card outline-none resize-none";
 
   return (
     <Layout>
@@ -103,9 +122,9 @@ export default function DetalleConsumidor() {
 
         {/* HEADER */}
         <div className="flex items-center gap-3">
-          <button onClick={() => navigate("/anh/consumidores")} className="p-2 rounded-xl border border-border text-muted-foreground hover:bg-card transition-colors">
+          <Button variant="outline" size="sm" onClick={() => navigate(-1)}>
             <ArrowLeft className="w-4 h-4" />
-          </button>
+          </Button>
           <div className="flex-1">
             <h1 className="text-xl font-bold text-foreground">
               {perfil.user.nombres} {perfil.user.apellido_paterno} {perfil.user.apellido_materno}
@@ -113,93 +132,98 @@ export default function DetalleConsumidor() {
             <p className="text-muted-foreground text-sm">{perfil.user.email}</p>
           </div>
           <div className="flex gap-2">
-            <EstadoSolicitudBadge estado={perfil.estado_identidad} />
-            <AlertaBadge alerta={perfil.alerta_repetitividad} />
+            <EstadoIdentidadBadge estado={perfil.estado_identidad} />
+            {perfil.alerta_repetitividad && perfil.alerta_repetitividad !== "NORMAL" && (
+              <AlertaBadge alerta={perfil.alerta_repetitividad} />
+            )}
           </div>
         </div>
 
-        {error && (
-          <div className="flex items-center gap-3 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
-            <AlertCircle className="w-4 h-4 shrink-0" /> {error}
-          </div>
-        )}
-        {exito && (
-          <div className="flex items-center gap-3 bg-state-success-bg border border-state-success-fg/20 text-state-success-fg rounded-xl px-4 py-3 text-sm">
-            <CheckCircle className="w-4 h-4 shrink-0" /> {exito}
-          </div>
-        )}
+        {alerta && <Alert type={alerta.type} message={alerta.message} />}
 
-        {/* DATOS PERSONALES */}
-        <div className="bg-card rounded-2xl border border-border shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-border flex items-center gap-2">
-            <User className="w-4 h-4 text-primary" />
-            <h2 className="font-semibold text-foreground">Datos personales</h2>
-          </div>
-          <div className="px-6 py-4 grid grid-cols-2 gap-4">
-            <Dato label="Nombres"          value={perfil.user.nombres} />
-            <Dato label="Primer apellido"  value={perfil.user.apellido_paterno} />
-            <Dato label="Segundo apellido" value={perfil.user.apellido_materno} />
-            <Dato label="Email"            value={perfil.user.email} />
-            <Dato label="Celular"          value={perfil.celular || "—"} />
-            <Dato label="Fecha nacimiento" value={formatFecha(perfil.fecha_nacimiento)} />
-            <Dato label="Registro"         value={formatFecha(perfil.fecha_creacion, true)} />
-          </div>
-        </div>
+        {/* DATOS PERSONALES + ACTIVIDAD (fusionados) */}
+        <Card>
+          <CardHeader>
+            <h2 className="font-semibold text-foreground flex items-center gap-2">
+              <User className="w-4 h-4 text-primary" />
+              Datos personales
+            </h2>
+          </CardHeader>
+          <CardBody>
+            <div className="grid grid-cols-2 gap-4">
+              <Dato label="Nombres"          value={perfil.user.nombres} />
+              <Dato label="Primer apellido"  value={perfil.user.apellido_paterno} />
+              <Dato label="Segundo apellido" value={perfil.user.apellido_materno} />
+              <Dato label="Email"            value={perfil.user.email} />
+              <Dato label="Celular"          value={perfil.celular || "—"} />
+              <Dato label="Fecha nacimiento" value={formatFecha(perfil.fecha_nacimiento)} />
+              <Dato label="Actividad económica" value={ACTIVIDADES[perfil.actividad] ?? perfil.actividad} />
+              <Dato label="Registro"         value={formatFecha(perfil.fecha_creacion, true)} />
+            </div>
+          </CardBody>
+        </Card>
 
         {/* UBICACIÓN */}
-        <div className="bg-card rounded-2xl border border-border shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-border flex items-center gap-2">
-            <MapPin className="w-4 h-4 text-primary" />
-            <h2 className="font-semibold text-foreground">Ubicación</h2>
-          </div>
-          <div className="px-6 py-4 grid grid-cols-2 gap-4">
-            <Dato label="Departamento" value={perfil.departamento_nombre} />
-            <Dato label="Provincia"    value={perfil.provincia_nombre} />
-            <Dato label="Municipio"    value={perfil.municipio_nombre} />
-            <Dato label="Dirección"    value={perfil.direccion} />
-          </div>
-        </div>
-
-        {/* ACTIVIDAD */}
-        <div className="bg-card rounded-2xl border border-border shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-border flex items-center gap-2">
-            <Briefcase className="w-4 h-4 text-primary" />
-            <h2 className="font-semibold text-foreground">Actividad económica</h2>
-          </div>
-          <div className="px-6 py-4">
-            <Dato label="Actividad" value={ACTIVIDADES[perfil.actividad] ?? perfil.actividad} />
-          </div>
-        </div>
+        <Card>
+          <CardHeader>
+            <h2 className="font-semibold text-foreground flex items-center gap-2">
+              <MapPin className="w-4 h-4 text-primary" />
+              Ubicación
+            </h2>
+          </CardHeader>
+          <CardBody>
+            <div className="grid grid-cols-2 gap-4">
+              <Dato label="Departamento" value={perfil.departamento_nombre} />
+              <Dato label="Provincia"    value={perfil.provincia_nombre} />
+              <Dato label="Municipio"    value={perfil.municipio_nombre} />
+              <Dato label="Dirección"    value={perfil.direccion} />
+            </div>
+          </CardBody>
+        </Card>
 
         {/* VERIFICACIÓN DE IDENTIDAD */}
-        <div className="bg-card rounded-2xl border border-border shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-border flex items-center justify-between">
-            <div className="flex items-center gap-2">
+        <Card>
+          <CardHeader className="flex items-center justify-between">
+            <h2 className="font-semibold text-foreground flex items-center gap-2">
               <Shield className="w-4 h-4 text-primary" />
-              <h2 className="font-semibold text-foreground">Verificación de identidad</h2>
-            </div>
-            <EstadoSolicitudBadge estado={perfil.estado_identidad} />
-          </div>
-          <div className="px-6 py-4">
+              Verificación de identidad
+            </h2>
+            <EstadoIdentidadBadge estado={perfil.estado_identidad} />
+          </CardHeader>
+          <CardBody>
             {!accionIdentidad ? (
               <div className="flex gap-2 flex-wrap">
                 {perfil.estado_identidad !== "VERIFICADO" && (
-                  <button onClick={() => { setAccionIdentidad("VERIFICADO"); setMotivo(""); }}
-                    className="flex items-center gap-2 px-3 py-2 bg-green-600 text-white rounded-xl text-xs font-medium hover:bg-green-700 transition-colors">
-                    <CheckCircle className="w-3.5 h-3.5" /> Verificar
-                  </button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<CheckCircle className="w-3.5 h-3.5" />}
+                    onClick={() => { setAccionIdentidad("VERIFICADO"); setMotivoIdentidad(""); }}
+                    className="bg-green-600 hover:bg-green-700"
+                  >
+                    Verificar
+                  </Button>
                 )}
                 {perfil.estado_identidad !== "EN_REVISION" && (
-                  <button onClick={() => { setAccionIdentidad("EN_REVISION"); setMotivo(""); }}
-                    className="flex items-center gap-2 px-3 py-2 bg-amber-500 text-white rounded-xl text-xs font-medium hover:bg-amber-600 transition-colors">
-                    <ShieldAlert className="w-3.5 h-3.5" /> En revisión
-                  </button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<ShieldAlert className="w-3.5 h-3.5" />}
+                    onClick={() => { setAccionIdentidad("EN_REVISION"); setMotivoIdentidad(""); }}
+                    className="bg-amber-500 hover:bg-amber-600"
+                  >
+                    En revisión
+                  </Button>
                 )}
                 {perfil.estado_identidad !== "RECHAZADO" && (
-                  <button onClick={() => { setAccionIdentidad("RECHAZADO"); setMotivo(""); }}
-                    className="flex items-center gap-2 px-3 py-2 bg-red-600 text-white rounded-xl text-xs font-medium hover:bg-red-700 transition-colors">
-                    <ShieldOff className="w-3.5 h-3.5" /> Rechazar
-                  </button>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    icon={<ShieldOff className="w-3.5 h-3.5" />}
+                    onClick={() => { setAccionIdentidad("RECHAZADO"); setMotivoIdentidad(""); }}
+                  >
+                    Rechazar
+                  </Button>
                 )}
               </div>
             ) : (
@@ -208,37 +232,41 @@ export default function DetalleConsumidor() {
                   Cambiar a: <span className="text-primary">{accionIdentidad}</span>
                 </p>
                 <textarea
-                  value={motivo}
-                  onChange={e => setMotivo(e.target.value)}
+                  value={motivoIdentidad}
+                  onChange={e => setMotivoIdentidad(e.target.value)}
                   rows={2}
                   placeholder={accionIdentidad === "RECHAZADO" ? "Motivo del rechazo (obligatorio)..." : "Observación (opcional)..."}
                   className={textareaCls}
                 />
                 <div className="flex gap-2">
-                  <button onClick={() => setAccionIdentidad(null)} className="px-3 py-2 border border-border text-muted-foreground rounded-xl text-xs hover:bg-background transition-colors">
+                  <Button variant="outline" size="sm" onClick={() => setAccionIdentidad(null)}>
                     Cancelar
-                  </button>
-                  <button onClick={() => cambiarIdentidad(accionIdentidad)} disabled={procesando}
-                    className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-xl text-xs font-medium hover:bg-primary-hover disabled:bg-slate-300 transition-colors">
-                    {procesando ? <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <CheckCircle className="w-3.5 h-3.5" />}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<CheckCircle className="w-3.5 h-3.5" />}
+                    loading={procesando}
+                    onClick={() => cambiarIdentidad(accionIdentidad)}
+                  >
                     Confirmar
-                  </button>
+                  </Button>
                 </div>
               </div>
             )}
-          </div>
-        </div>
+          </CardBody>
+        </Card>
 
         {/* ALERTA DE REPETITIVIDAD */}
-        <div className="bg-card rounded-2xl border border-border shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-border flex items-center justify-between">
-            <div className="flex items-center gap-2">
+        <Card>
+          <CardHeader className="flex items-center justify-between">
+            <h2 className="font-semibold text-foreground flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-primary" />
-              <h2 className="font-semibold text-foreground">Alerta de repetitividad</h2>
-            </div>
+              Alerta de repetitividad
+            </h2>
             <AlertaBadge alerta={perfil.alerta_repetitividad} />
-          </div>
-          <div className="px-6 py-4">
+          </CardHeader>
+          <CardBody>
             {perfil.motivo_bloqueo && (
               <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2 mb-3">
                 {perfil.motivo_bloqueo}
@@ -249,25 +277,40 @@ export default function DetalleConsumidor() {
                 Alerta desde: {formatFecha(perfil.fecha_alerta, true)}
               </p>
             )}
+
             {!accionAlerta ? (
               <div className="flex gap-2 flex-wrap">
                 {perfil.alerta_repetitividad !== "NORMAL" && (
-                  <button onClick={() => { setAccionAlerta("NORMAL"); setMotivo(""); }}
-                    className="flex items-center gap-2 px-3 py-2 bg-green-600 text-white rounded-xl text-xs font-medium hover:bg-green-700 transition-colors">
-                    <CheckCircle className="w-3.5 h-3.5" /> Resolver alerta
-                  </button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<CheckCircle className="w-3.5 h-3.5" />}
+                    onClick={() => { setAccionAlerta("NORMAL"); setMotivoAlerta(""); }}
+                    className="bg-green-600 hover:bg-green-700"
+                  >
+                    Resolver alerta
+                  </Button>
                 )}
                 {perfil.alerta_repetitividad !== "EN_REVISION" && (
-                  <button onClick={() => { setAccionAlerta("EN_REVISION"); setMotivo(""); }}
-                    className="flex items-center gap-2 px-3 py-2 bg-amber-500 text-white rounded-xl text-xs font-medium hover:bg-amber-600 transition-colors">
-                    <ShieldAlert className="w-3.5 h-3.5" /> Poner en revisión
-                  </button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<ShieldAlert className="w-3.5 h-3.5" />}
+                    onClick={() => { setAccionAlerta("EN_REVISION"); setMotivoAlerta(""); }}
+                    className="bg-amber-500 hover:bg-amber-600"
+                  >
+                    Poner en revisión
+                  </Button>
                 )}
                 {perfil.alerta_repetitividad !== "BLOQUEADO" && (
-                  <button onClick={() => { setAccionAlerta("BLOQUEADO"); setMotivo(""); }}
-                    className="flex items-center gap-2 px-3 py-2 bg-red-600 text-white rounded-xl text-xs font-medium hover:bg-red-700 transition-colors">
-                    <ShieldOff className="w-3.5 h-3.5" /> Bloquear
-                  </button>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    icon={<ShieldOff className="w-3.5 h-3.5" />}
+                    onClick={() => { setAccionAlerta("BLOQUEADO"); setMotivoAlerta(""); }}
+                  >
+                    Bloquear
+                  </Button>
                 )}
               </div>
             ) : (
@@ -276,36 +319,42 @@ export default function DetalleConsumidor() {
                   Cambiar alerta a: <span className="text-primary">{accionAlerta}</span>
                 </p>
                 <textarea
-                  value={motivo}
-                  onChange={e => setMotivo(e.target.value)}
+                  value={motivoAlerta}
+                  onChange={e => setMotivoAlerta(e.target.value)}
                   rows={2}
                   placeholder={accionAlerta === "BLOQUEADO" ? "Motivo del bloqueo (obligatorio)..." : "Observación (opcional)..."}
                   className={textareaCls}
                 />
                 <div className="flex gap-2">
-                  <button onClick={() => setAccionAlerta(null)} className="px-3 py-2 border border-border text-muted-foreground rounded-xl text-xs hover:bg-background transition-colors">
+                  <Button variant="outline" size="sm" onClick={() => setAccionAlerta(null)}>
                     Cancelar
-                  </button>
-                  <button onClick={() => cambiarAlerta(accionAlerta)} disabled={procesando}
-                    className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-xl text-xs font-medium hover:bg-primary-hover disabled:bg-slate-300 transition-colors">
-                    {procesando ? <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <CheckCircle className="w-3.5 h-3.5" />}
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<CheckCircle className="w-3.5 h-3.5" />}
+                    loading={procesando}
+                    onClick={() => cambiarAlerta(accionAlerta)}
+                  >
                     Confirmar
-                  </button>
+                  </Button>
                 </div>
               </div>
             )}
-          </div>
-        </div>
+          </CardBody>
+        </Card>
 
         {/* DOCUMENTOS */}
         {perfil.documentos.length > 0 && (
-          <div className="bg-card rounded-2xl border border-border shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-border flex items-center gap-2">
-              <FileImage className="w-4 h-4 text-primary" />
-              <h2 className="font-semibold text-foreground">Documentos de identidad</h2>
-            </div>
+          <Card>
+            <CardHeader>
+              <h2 className="font-semibold text-foreground flex items-center gap-2">
+                <FileImage className="w-4 h-4 text-primary" />
+                Documentos de identidad
+              </h2>
+            </CardHeader>
             {perfil.documentos.map(doc => (
-              <div key={doc.id} className="px-6 py-4 border-b border-border last:border-0">
+              <CardBody key={doc.id} className="border-b border-border last:border-0">
                 <p className="text-sm font-semibold text-foreground mb-1">{doc.tipo_documento_display}</p>
                 <p className="text-xs text-muted-foreground mb-3">
                   N°: {doc.numero_documento} {doc.complemento_documento}
@@ -323,9 +372,9 @@ export default function DetalleConsumidor() {
                     </a>
                   ) : null)}
                 </div>
-              </div>
+              </CardBody>
             ))}
-          </div>
+          </Card>
         )}
       </div>
     </Layout>
