@@ -12,6 +12,9 @@ from rest_framework import status
 
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from rest_framework.parsers import MultiPartParser, FormParser
+from .serializers_admin import RegistroConsumidorPorAdminSerializer
+
 from .models import User, TokenVerificacion
 from .services import crear_token_verificacion
 from .email_service import (
@@ -743,3 +746,65 @@ class FuncionarioCambiarEstadoView(APIView):
             "detail": f"Estado cambiado a {nuevo_estado}.",
             "estado_cuenta": nuevo_estado,
         })
+
+class RegistroConsumidorPorAdminView(APIView):
+    """
+    POST /api/users/registro/consumidor-por-admin/
+ 
+    Registra a un consumidor iniciado por un funcionario ANH o ADMIN
+    (típicamente en atención presencial).
+ 
+    A diferencia del auto-registro público:
+      - El admin no elige contraseña — la genera el backend
+      - No se envía PIN de verificación (el admin verifica al consumidor
+        presencialmente contra su documento físico)
+      - El email queda marcado como verificado
+      - Se devuelve la contraseña temporal para que el admin la comparta
+        con el consumidor
+ 
+    Solo usuarios ANH o ADMIN autenticados pueden llamar este endpoint.
+ 
+    Retorna 201 con:
+        {
+            "message":           "Consumidor registrado correctamente",
+            "user_id":           <id>,
+            "email":             "consumidor@example.com",
+            "password_temporal": "aB3xY9Kq2Nm7",
+            "aviso":             "El consumidor deberá cambiar esta contraseña
+                                  al iniciar sesión por primera vez."
+        }
+    """
+ 
+    permission_classes = [IsAuthenticated]
+    parser_classes     = [MultiPartParser, FormParser]
+ 
+    def post(self, request):
+ 
+        # Solo ANH y ADMIN pueden registrar consumidores por esta vía.
+        # (No usamos un permission class dedicado para mantener la view
+        # autocontenida; si tienes IsAdminOrANH en users.permissions,
+        # cámbialo por eso — más limpio.)
+        if request.user.tipo_usuario not in ("ANH", "ADMIN"):
+            return Response(
+                {"detail": "Solo ANH o ADMIN pueden registrar consumidores."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+ 
+        serializer = RegistroConsumidorPorAdminSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+ 
+        return Response(
+            {
+                "message":           "Consumidor registrado correctamente",
+                "user_id":           user.id,
+                "email":             user.email,
+                "password_temporal": user._password_temporal,
+                "aviso":             (
+                    "El consumidor deberá cambiar esta contraseña al iniciar "
+                    "sesión por primera vez."
+                ),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+ 

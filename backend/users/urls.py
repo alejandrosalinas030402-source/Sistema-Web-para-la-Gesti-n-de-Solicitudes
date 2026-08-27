@@ -17,6 +17,7 @@ from .views import (
     RecuperarPasswordView,
     CambiarPasswordView,
     MiPerfilView,
+    RegistroConsumidorPorAdminView,
 )
 
 urlpatterns = [
@@ -25,6 +26,7 @@ urlpatterns = [
     # REGISTRO
     # ------------------------------------------------
     path("registro/consumidor/",   RegistroConsumidorView.as_view(),  name="registro-consumidor"),
+    path("registro/consumidor-por-admin/",  RegistroConsumidorPorAdminView.as_view(),   name="registro-consumidor-por-admin",),
     path("funcionarios/crear/",    CrearFuncionarioView.as_view(),     name="crear-funcionario"),
 
     # ------------------------------------------------

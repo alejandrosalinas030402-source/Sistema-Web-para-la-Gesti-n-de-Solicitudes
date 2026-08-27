@@ -10,7 +10,7 @@ import { Button } from "../../components/ui/Button";
 import { Alert } from "../../components/ui/Alert";
 import { Spinner } from "../../components/ui/Spinner";
 import { ESTADOS_IDENTIDAD, ALERTAS_CONSUMIDOR } from "../../utils/constants";
-import { formatLitros, formatFecha } from "../../utils/format";
+import { formatLitros, } from "../../utils/format";
 import {
   LayoutDashboard, FileText, Users, CheckCircle,
   Clock, AlertTriangle, TrendingUp, RefreshCw, ArrowRight,
@@ -152,7 +152,7 @@ export default function DashboardANH() {
             </div>
             <div>
               <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
-              <p className="text-muted-foreground text-xs">Actualizado: {formatFecha(data.generado_en, true)}</p>
+              <p className="text-muted-foreground text-xs">Actualizado: {data.generado_en}</p>
             </div>
           </div>
           <Button variant="outline" icon={<RefreshCw className="w-4 h-4" />} onClick={cargar}>

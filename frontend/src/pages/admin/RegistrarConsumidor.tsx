@@ -1,5 +1,4 @@
 // src/pages/admin/RegistrarConsumidor.tsx
-// Wizard completo para que ADMIN/ANH registren consumidores
 
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
@@ -7,463 +6,686 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import Layout from "../../components/Layout";
-import { api } from "../../context/AuthContext";
+import { Card, CardBody } from "../../components/ui/Card";
+import { Button } from "../../components/ui/Button";
+import { Alert } from "../../components/ui/Alert";
+import { Modal } from "../../components/ui/Modal";
+import { Stepper } from "../../components/ui/Stepper";
+import { authService } from "../../services/auth.service";
 import { catalogosService } from "../../services/catalogos.service";
-import type { Departamento, Provincia, Municipio } from "../../types/consumidor.types";
 import { ACTIVIDADES, TIPOS_DOCUMENTO } from "../../utils/constants";
+import type { Departamento, Provincia, Municipio } from "../../types/consumidor.types";
 import {
-  ChevronRight, ChevronLeft, CheckCircle, AlertCircle,
-  Upload, Eye, EyeOff, ArrowLeft, UserPlus
+  UserPlus, ArrowLeft, ArrowRight, CheckCircle,
+  ImagePlus, X, Info, Copy,
 } from "lucide-react";
 
 // ------------------------------------------------
-// SCHEMAS
+// SCHEMA
 // ------------------------------------------------
 
-const paso1Schema = z.object({
-  tipo_documento:        z.string().min(1, "Selecciona el tipo de documento"),
+const schema = z.object({
+  // Paso 1: Datos personales
+  email:            z.string().email("Email inválido"),
+  nombres:          z.string().min(2, "Mínimo 2 caracteres"),
+  apellido_paterno: z.string().min(2, "Mínimo 2 caracteres"),
+  apellido_materno: z.string().optional(),
+  celular:          z.string().min(7, "Mínimo 7 dígitos").regex(/^\d+$/, "Solo se permiten números"),
+  fecha_nacimiento: z.string().min(1, "Fecha requerida"),
+
+  // Paso 2: Ubicación
+  departamento: z.number().int().positive("Selecciona un departamento"),
+  provincia:    z.number().int().positive("Selecciona una provincia"),
+  municipio:    z.number().int().positive("Selecciona un municipio"),
+  direccion:    z.string().optional(),
+  actividad:    z.string().min(1, "Selecciona la actividad económica"),
+
+  // Paso 3: Documento
+  // Las tres imágenes son obligatorias: el backend las exige
+  // (ImageField sin required=False en RegistroConsumidorPorAdminSerializer).
+  tipo_documento:        z.enum(["CI", "CIE"]),
   numero_documento:      z.string()
-    .min(7, "Mínimo 7 dígitos").max(9, "Máximo 9 dígitos")
-    .regex(/^[0-9]+$/, "Solo dígitos"),
-  complemento_documento: z.string().max(10).regex(/^[a-zA-Z0-9\-]*$/, "Solo letras, números y guión").optional(),
-  nombres:               z.string().min(2, "Ingresa los nombres").regex(/^[a-zA-ZáéíóúÁÉÍÓÚüÜñÑ ]+$/, "Solo letras"),
-  apellido_paterno:      z.string().min(2, "Ingresa el primer apellido").regex(/^[a-zA-ZáéíóúÁÉÍÓÚüÜñÑ ]+$/, "Solo letras"),
-  apellido_materno:      z.string().regex(/^[a-zA-ZáéíóúÁÉÍÓÚüÜñÑ ]*$/, "Solo letras").optional(),
-  fecha_nacimiento:      z.string().min(1, "Ingresa la fecha de nacimiento"),
+                          .min(5, "Mínimo 5 dígitos")
+                          .regex(/^\d+$/, "Solo se permiten números"),
+  complemento_documento: z.string().optional(),
+  documento_anverso:     z.instanceof(FileList).refine(f => f.length > 0, "Requerido"),
+  documento_reverso:     z.instanceof(FileList).refine(f => f.length > 0, "Requerido"),
+  foto_sosteniendo:      z.instanceof(FileList).refine(f => f.length > 0, "Requerido"),
 });
 
-const paso2Schema = z.object({
-  email:        z.string().email("Email inválido"),
-  celular:      z.string().min(7, "Ingresa el celular"),
-  departamento: z.string().min(1, "Selecciona un departamento"),
-  provincia:    z.string().min(1, "Selecciona una provincia"),
-  municipio:    z.string().min(1, "Selecciona un municipio"),
-  actividad:    z.string().min(1, "Selecciona una actividad"),
-  direccion:    z.string().min(5, "Ingresa la dirección").max(100),
-});
-
-const paso3Schema = z.object({
-  password:  z.string().min(8, "Mínimo 8 caracteres"),
-  password2: z.string().min(1, "Repite la contraseña"),
-}).refine(d => d.password === d.password2, {
-  message: "Las contraseñas no coinciden",
-  path: ["password2"],
-});
-
-type Paso1Data = z.infer<typeof paso1Schema>;
-type Paso2Data = z.infer<typeof paso2Schema>;
-type Paso3Data = z.infer<typeof paso3Schema>;
+type FormData = z.infer<typeof schema>;
 
 // ------------------------------------------------
-// PASO INDICADOR
+// STEPS
 // ------------------------------------------------
-function PasoIndicador({ actual }: { actual: number }) {
-  const pasos = ["Identidad", "Datos", "Contraseña", "Documentos"];
+
+const STEPS = [
+  { label: "Datos personales" },
+  { label: "Ubicación y consumo" },
+  { label: "Documento" },
+  { label: "Revisión" },
+];
+
+// Campos de cada paso — para validar antes de avanzar
+const CAMPOS_PASO: Record<number, (keyof FormData)[]> = {
+  1: ["email", "nombres", "apellido_paterno", "apellido_materno", "celular", "fecha_nacimiento"],
+  2: ["departamento", "provincia", "municipio", "direccion", "actividad"],
+  3: ["tipo_documento", "numero_documento", "documento_anverso", "documento_reverso", "foto_sosteniendo"],
+};
+
+// ------------------------------------------------
+// COMPONENTE PRINCIPAL
+// ------------------------------------------------
+
+export default function RegistrarConsumidor() {
+  const navigate = useNavigate();
+  const [paso,       setPaso]       = useState(1);
+  const [enviando,   setEnviando]   = useState(false);
+  const [errorForm,  setErrorForm]  = useState("");
+
+  // Datos de éxito para el modal (incluye contraseña temporal)
+  const [exitoData, setExitoData] = useState<{
+    nombre:   string;
+    email:    string;
+    password: string;
+  } | null>(null);
+
+  const {
+    register, handleSubmit, watch, setValue, trigger,
+    formState: { errors },
+  } = useForm<FormData>({
+    resolver: zodResolver(schema),
+    defaultValues: {
+      email: "", nombres: "", apellido_paterno: "", apellido_materno: "",
+      celular: "", fecha_nacimiento: "",
+      departamento: 0, provincia: 0, municipio: 0, direccion: "",
+      actividad: "",
+      tipo_documento: "CI", numero_documento: "", complemento_documento: "",
+    },
+  });
+
+  const [deptos, setDeptos] = useState<Departamento[]>([]);
+  const [provs,  setProvs]  = useState<Provincia[]>([]);
+  const [munis,  setMunis]  = useState<Municipio[]>([]);
+  const [loadCat, setLoadCat] = useState(false);
+
+  const watchDepto  = watch("departamento");
+  const watchProv   = watch("provincia");
+  const watchAnv    = watch("documento_anverso");
+  const watchRev    = watch("documento_reverso");
+  const watchFoto   = watch("foto_sosteniendo");
+  const values      = watch();
+
+  useEffect(() => {
+    catalogosService.getDepartamentos().then(setDeptos).catch(() => {});
+  }, []);
+
+  const onDeptoChange = async (deptoId: number) => {
+    setValue("departamento", deptoId);
+    setValue("provincia", 0);
+    setValue("municipio", 0);
+    setProvs([]); setMunis([]);
+    if (!deptoId) return;
+    setLoadCat(true);
+    try { setProvs(await catalogosService.getProvincias(deptoId)); }
+    finally { setLoadCat(false); }
+  };
+
+  const onProvChange = async (provId: number) => {
+    setValue("provincia", provId);
+    setValue("municipio", 0);
+    setMunis([]);
+    if (!provId) return;
+    setLoadCat(true);
+    try { setMunis(await catalogosService.getMunicipios(provId)); }
+    finally { setLoadCat(false); }
+  };
+
+  // ------------------------------------------------
+  // NAVEGACIÓN ENTRE PASOS
+  // ------------------------------------------------
+
+  const irSiguiente = async () => {
+    const camposActuales = CAMPOS_PASO[paso];
+    const ok = await trigger(camposActuales);
+    if (ok) {
+      setErrorForm("");
+      setPaso(p => p + 1);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
+
+  const irAnterior = () => {
+    setErrorForm("");
+    setPaso(p => p - 1);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const irAPaso = (n: number) => {
+    setErrorForm("");
+    setPaso(n);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  // ------------------------------------------------
+  // SUBMIT FINAL — payload plano al endpoint por-admin
+  // ------------------------------------------------
+
+  const onSubmit = async (data: FormData) => {
+    setEnviando(true);
+    setErrorForm("");
+    try {
+      const fd = new FormData();
+      fd.append("email",              data.email);
+      fd.append("nombres",            data.nombres);
+      fd.append("apellido_paterno",   data.apellido_paterno);
+      fd.append("apellido_materno",   data.apellido_materno ?? "");
+      fd.append("celular",            data.celular);
+      fd.append("fecha_nacimiento",   data.fecha_nacimiento);
+      fd.append("departamento",       String(data.departamento));
+      fd.append("provincia",          String(data.provincia));
+      fd.append("municipio",          String(data.municipio));
+      fd.append("direccion",          data.direccion ?? "");
+      fd.append("actividad",          data.actividad);
+      fd.append("tipo_documento",     data.tipo_documento);
+      fd.append("numero_documento",   data.numero_documento);
+      if (data.complemento_documento) {
+        fd.append("complemento_documento", data.complemento_documento);
+      }
+      fd.append("anverso",          data.documento_anverso[0]);
+      fd.append("reverso",          data.documento_reverso[0]);
+      fd.append("foto_sosteniendo", data.foto_sosteniendo[0]);
+
+      const res = await authService.registroPorAdmin(fd);
+      setExitoData({
+        nombre:   `${data.nombres} ${data.apellido_paterno}`,
+        email:    res.email,
+        password: res.password_temporal,
+      });
+    } catch (err: unknown) {
+      // El backend puede devolver un string plano o un objeto de errores
+      // por campo. Si es string, iterarlo con Object.entries lo partiría
+      // carácter por carácter, así que se distingue el tipo primero.
+      const e = err as { response?: { data?: unknown } };
+      const d = e.response?.data;
+      let msg = "Error al registrar el consumidor.";
+
+      if (typeof d === "string") {
+        msg = d;
+      } else if (d && typeof d === "object") {
+        const entries = Object.entries(d as Record<string, unknown>);
+        if (entries.length > 0) {
+          msg = entries
+            .map(([k, v]) => `${k}: ${Array.isArray(v) ? v[0] : String(v)}`)
+            .join(" | ");
+        }
+      }
+
+      setErrorForm(msg);
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  const inputCls  = "w-full px-4 py-2.5 rounded-xl border border-border text-sm bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card outline-none";
+  const selectCls = inputCls + " disabled:opacity-50";
+  const errorCls  = "text-red-500 text-xs mt-1";
+
+  const nombreCompleto = `${values.nombres} ${values.apellido_paterno} ${values.apellido_materno ?? ""}`.trim();
+  const ubicacionLabel = [
+    deptos.find(d => d.id === values.departamento)?.nombre,
+    provs.find(p => p.id === values.provincia)?.nombre,
+    munis.find(m => m.id === values.municipio)?.nombre,
+  ].filter(Boolean).join(" · ") || "—";
+
   return (
-    <div className="flex items-center justify-center gap-2 mb-6">
-      {pasos.map((label, i) => {
-        const num      = i + 1;
-        const activo   = num === actual;
-        const completo = num < actual;
-        return (
-          <div key={num} className="flex items-center gap-2">
-            <div className="flex flex-col items-center gap-1">
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold transition-colors ${
-                completo ? "bg-primary text-primary-foreground" :
-                activo   ? "bg-navbar text-navbar-foreground" :
-                           "bg-border text-muted-foreground"
-              }`}>
-                {completo ? <CheckCircle className="w-4 h-4" /> : num}
+    <Layout>
+      <div className="max-w-3xl mx-auto space-y-5">
+
+        {/* HEADER */}
+        <div className="flex items-center gap-3">
+          <Button variant="outline" size="sm" onClick={() => navigate(-1)}>
+            <ArrowLeft className="w-4 h-4" />
+          </Button>
+          <div className="flex-1">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-navbar rounded-xl flex items-center justify-center">
+                <UserPlus className="w-5 h-5 text-navbar-foreground" />
               </div>
-              <span className={`text-xs hidden sm:block ${activo ? "text-foreground font-medium" : "text-muted-foreground"}`}>
-                {label}
-              </span>
+              <div>
+                <h1 className="text-2xl font-bold text-foreground">Registrar Consumidor</h1>
+                <p className="text-muted-foreground text-sm">Completa los datos en {STEPS.length} pasos</p>
+              </div>
             </div>
-            {i < pasos.length - 1 && (
-              <div className={`w-8 sm:w-12 h-0.5 mb-4 ${num < actual ? "bg-primary" : "bg-border"}`} />
-            )}
           </div>
-        );
-      })}
+        </div>
+
+        {/* STEPPER */}
+        <Card>
+          <div className="px-5 py-3 border-b border-border">
+            <Stepper steps={STEPS} currentStep={paso} />
+          </div>
+
+          {/*
+            El submit del formulario se bloquea a propósito: el envío real
+            se dispara solo desde el botón "Registrar consumidor" del paso 4.
+            Así, presionar Enter en cualquier input no crea el consumidor
+            a medio llenar.
+          */}
+          <form onSubmit={e => e.preventDefault()}>
+
+            {/* PASO 1 — DATOS PERSONALES */}
+            {paso === 1 && (
+              <CardBody className="space-y-4">
+                <h2 className="font-semibold text-foreground">Datos personales del consumidor</h2>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Nombres *</label>
+                    <input {...register("nombres")} className={inputCls} />
+                    {errors.nombres && <p className={errorCls}>{errors.nombres.message}</p>}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Apellido paterno *</label>
+                    <input {...register("apellido_paterno")} className={inputCls} />
+                    {errors.apellido_paterno && <p className={errorCls}>{errors.apellido_paterno.message}</p>}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Apellido materno</label>
+                    <input {...register("apellido_materno")} className={inputCls} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Fecha de nacimiento *</label>
+                    <input type="date" {...register("fecha_nacimiento")} className={inputCls} />
+                    {errors.fecha_nacimiento && <p className={errorCls}>{errors.fecha_nacimiento.message}</p>}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Email *</label>
+                    <input type="email" {...register("email")} className={inputCls} />
+                    {errors.email && <p className={errorCls}>{errors.email.message}</p>}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Celular *</label>
+                    <input
+                      {...register("celular")}
+                      className={inputCls}
+                      inputMode="numeric"
+                      placeholder="Ej: 78123456"
+                      onInput={e => {
+                        const el = e.target as HTMLInputElement;
+                        el.value = el.value.replace(/\D/g, "");
+                      }}
+                    />
+                    {errors.celular && <p className={errorCls}>{errors.celular.message}</p>}
+                  </div>
+                </div>
+              </CardBody>
+            )}
+
+            {/* PASO 2 — UBICACIÓN Y CONSUMO */}
+            {paso === 2 && (
+              <CardBody className="space-y-4">
+                <h2 className="font-semibold text-foreground">Ubicación y actividad económica</h2>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Departamento *</label>
+                    <select value={watchDepto || 0} onChange={e => onDeptoChange(Number(e.target.value))} className={selectCls}>
+                      <option value={0}>Seleccionar...</option>
+                      {deptos.map(d => <option key={d.id} value={d.id}>{d.nombre}</option>)}
+                    </select>
+                    {errors.departamento && <p className={errorCls}>{errors.departamento.message}</p>}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Provincia *</label>
+                    <select value={watchProv || 0} onChange={e => onProvChange(Number(e.target.value))}
+                      disabled={!watchDepto || loadCat} className={selectCls}>
+                      <option value={0}>{loadCat ? "Cargando..." : "Seleccionar..."}</option>
+                      {provs.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+                    </select>
+                    {errors.provincia && <p className={errorCls}>{errors.provincia.message}</p>}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Municipio *</label>
+                    <select {...register("municipio", { valueAsNumber: true })}
+                      disabled={!watchProv || loadCat} className={selectCls}>
+                      <option value={0}>{loadCat ? "Cargando..." : "Seleccionar..."}</option>
+                      {munis.map(m => <option key={m.id} value={m.id}>{m.nombre}</option>)}
+                    </select>
+                    {errors.municipio && <p className={errorCls}>{errors.municipio.message}</p>}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-1">Dirección (opcional)</label>
+                  <input {...register("direccion")} className={inputCls} placeholder="Calle, número, referencia..." />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-muted-foreground mb-1">Actividad económica *</label>
+                  <select {...register("actividad")} className={inputCls}>
+                    <option value="">Seleccionar...</option>
+                    {Object.entries(ACTIVIDADES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                  </select>
+                  {errors.actividad && <p className={errorCls}>{errors.actividad.message}</p>}
+                </div>
+              </CardBody>
+            )}
+
+            {/* PASO 3 — DOCUMENTO */}
+            {paso === 3 && (
+              <CardBody className="space-y-4">
+                <h2 className="font-semibold text-foreground">Documento de identidad</h2>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Tipo *</label>
+                    <select {...register("tipo_documento")} className={inputCls}>
+                      {TIPOS_DOCUMENTO.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Número *</label>
+                    <input
+                      {...register("numero_documento")}
+                      className={inputCls}
+                      inputMode="numeric"
+                      placeholder="Ej: 12345678"
+                      onInput={e => {
+                        // Bloquea cualquier carácter que no sea dígito
+                        const el = e.target as HTMLInputElement;
+                        el.value = el.value.replace(/\D/g, "");
+                      }}
+                    />
+                    {errors.numero_documento && <p className={errorCls}>{errors.numero_documento.message}</p>}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">Complemento</label>
+                    <input {...register("complemento_documento")} className={inputCls} placeholder="Opcional" />
+                  </div>
+                </div>
+
+                <div className="bg-primary/5 border border-primary/20 rounded-xl px-4 py-3 flex items-start gap-2">
+                  <Info className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+                  <p className="text-xs text-primary">
+                    Sube fotos claras y legibles del documento. Las <strong>tres imágenes son obligatorias</strong>.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <UploadCard
+                    label="Anverso"
+                    required
+                    register={register("documento_anverso")}
+                    files={watchAnv}
+                    onClear={() => setValue("documento_anverso", null as unknown as FileList)}
+                    error={errors.documento_anverso?.message as string | undefined}
+                  />
+                  <UploadCard
+                    label="Reverso"
+                    required
+                    register={register("documento_reverso")}
+                    files={watchRev}
+                    onClear={() => setValue("documento_reverso", null as unknown as FileList)}
+                    error={errors.documento_reverso?.message as string | undefined}
+                  />
+                  <UploadCard
+                    label="Con documento en mano"
+                    required
+                    register={register("foto_sosteniendo")}
+                    files={watchFoto}
+                    onClear={() => setValue("foto_sosteniendo", null as unknown as FileList)}
+                    error={errors.foto_sosteniendo?.message as string | undefined}
+                  />
+                </div>
+              </CardBody>
+            )}
+
+            {/* PASO 4 — REVISIÓN */}
+            {paso === 4 && (
+              <CardBody className="space-y-4">
+                <h2 className="font-semibold text-foreground">Revisar y confirmar</h2>
+                <p className="text-sm text-muted-foreground">
+                  Verifica que los datos sean correctos antes de crear el consumidor.
+                </p>
+
+                {errorForm && <Alert type="error" message={errorForm} />}
+
+                <ReviewSection
+                  title="Datos personales"
+                  onEdit={() => irAPaso(1)}
+                  items={[
+                    ["Nombre completo",     nombreCompleto || "—"],
+                    ["Email",               values.email || "—"],
+                    ["Celular",             values.celular || "—"],
+                    ["Fecha de nacimiento", values.fecha_nacimiento || "—"],
+                  ]}
+                />
+
+                <ReviewSection
+                  title="Ubicación y consumo"
+                  onEdit={() => irAPaso(2)}
+                  items={[
+                    ["Ubicación", ubicacionLabel],
+                    ["Dirección", values.direccion || "—"],
+                    ["Actividad", ACTIVIDADES[values.actividad] ?? "—"],
+                  ]}
+                />
+
+                <ReviewSection
+                  title="Documento de identidad"
+                  onEdit={() => irAPaso(3)}
+                  items={[
+                    ["Tipo",     `${values.tipo_documento} — ${values.numero_documento || "—"}${values.complemento_documento ? " " + values.complemento_documento : ""}`],
+                    ["Anverso",     watchAnv?.[0]  ? "✓ Cargado" : "—"],
+                    ["Reverso",     watchRev?.[0]  ? "✓ Cargado" : "—"],
+                    ["Sosteniendo", watchFoto?.[0] ? "✓ Cargado" : "—"],
+                  ]}
+                />
+              </CardBody>
+            )}
+
+            {/*
+              NAVEGACIÓN ENTRE PASOS
+
+              Los `key` distintos son necesarios: sin ellos React reutiliza
+              el mismo nodo DOM entre "Siguiente" y "Registrar consumidor"
+              (ocupan la misma posición en el árbol), y al pasar del paso 3
+              al 4 el navegador terminaba disparando el submit con el
+              atributo ya actualizado — registrando sin que nadie pulsara
+              el botón final.
+            */}
+            <div className="px-5 py-4 border-t border-border flex items-center justify-between">
+              {paso > 1 ? (
+                <Button variant="outline" type="button" icon={<ArrowLeft className="w-4 h-4" />} onClick={irAnterior}>
+                  Anterior
+                </Button>
+              ) : (
+                <Button variant="outline" type="button" onClick={() => navigate(-1)}>
+                  Cancelar
+                </Button>
+              )}
+
+              <span className="text-xs text-muted-foreground">Paso {paso} de {STEPS.length}</span>
+
+              {paso < STEPS.length ? (
+                <Button
+                  key="btn-siguiente"
+                  variant="primary"
+                  type="button"
+                  onClick={irSiguiente}
+                >
+                  Siguiente
+                  <ArrowRight className="w-4 h-4" />
+                </Button>
+              ) : (
+                <Button
+                  key="btn-registrar"
+                  variant="primary"
+                  type="button"
+                  icon={<CheckCircle className="w-4 h-4" />}
+                  loading={enviando}
+                  onClick={handleSubmit(onSubmit)}
+                >
+                  Registrar consumidor
+                </Button>
+              )}
+            </div>
+          </form>
+        </Card>
+      </div>
+
+      {/* MODAL DE ÉXITO CON CONTRASEÑA TEMPORAL */}
+      <Modal open={!!exitoData} onClose={() => {}} title="" size="md">
+        {exitoData && (
+          <div className="py-2">
+            <div className="text-center mb-4">
+              <div className="w-14 h-14 rounded-full bg-state-success-bg flex items-center justify-center mx-auto mb-3">
+                <CheckCircle className="w-7 h-7 text-state-success-fg" />
+              </div>
+              <h3 className="font-semibold text-foreground mb-1">Consumidor registrado</h3>
+              <p className="text-sm text-muted-foreground">
+                <strong>{exitoData.nombre}</strong> fue registrado correctamente.
+              </p>
+            </div>
+
+            <Alert
+              type="warning"
+              message="Guarda esta contraseña. Deberás compartirla con el consumidor para que pueda ingresar. Solo se muestra una vez."
+            />
+
+            <div className="mt-4 space-y-3">
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Email</p>
+                <p className="text-sm font-medium text-foreground">{exitoData.email}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Contraseña temporal</p>
+                <div className="flex gap-2">
+                  <input
+                    readOnly
+                    value={exitoData.password}
+                    className={inputCls + " font-mono"}
+                  />
+                  <Button
+                    variant="outline"
+                    icon={<Copy className="w-4 h-4" />}
+                    onClick={() => navigator.clipboard.writeText(exitoData.password)}
+                  >
+                    Copiar
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-2 text-xs text-muted-foreground mt-3">
+              <Info className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>El consumidor deberá cambiar esta contraseña al iniciar sesión por primera vez.</span>
+            </div>
+
+            <div className="flex flex-col gap-2 mt-5">
+              <Button variant="primary" onClick={() => navigate("/anh/consumidores")}>
+                Ir al listado
+              </Button>
+              <Button variant="outline" onClick={() => window.location.reload()}>
+                Registrar otro consumidor
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+    </Layout>
+  );
+}
+
+// ------------------------------------------------
+// SUB-COMPONENTE: UPLOAD CARD CON PREVIEW
+// ------------------------------------------------
+
+interface UploadCardProps {
+  label:     string;
+  required?: boolean;
+  register:  ReturnType<ReturnType<typeof useForm<FormData>>["register"]>;
+  files:     FileList | undefined;
+  onClear:   () => void;
+  error?:    string;
+}
+
+function UploadCard({ label, required, register, files, onClear, error }: UploadCardProps) {
+  const hasFile = files && files.length > 0;
+  const previewUrl = hasFile ? URL.createObjectURL(files[0]) : null;
+
+  return (
+    <div>
+      <div className={`
+        relative rounded-xl border-2 overflow-hidden transition-colors
+        ${hasFile ? "border-primary" : error ? "border-red-300" : "border-dashed border-border hover:border-primary/50"}
+      `}>
+        {hasFile && previewUrl ? (
+          <>
+            <img src={previewUrl} alt={label} className="w-full h-24 object-cover" />
+            <button
+              type="button"
+              onClick={onClear}
+              className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-black/80 transition-colors"
+              title="Quitar imagen"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+            <div className="absolute top-1 left-1 bg-state-success-bg text-state-success-fg text-[10px] font-semibold px-2 py-0.5 rounded-full">
+              ✓ Cargada
+            </div>
+          </>
+        ) : (
+          <label className="flex flex-col items-center justify-center h-24 cursor-pointer bg-background/50">
+            <ImagePlus className="w-6 h-6 text-muted-foreground mb-1" />
+            <span className="text-xs text-muted-foreground">Seleccionar</span>
+            <input type="file" accept="image/*" className="hidden" {...register} />
+          </label>
+        )}
+      </div>
+      <p className="text-xs text-center mt-1">
+        <span className={hasFile ? "text-foreground font-medium" : "text-muted-foreground"}>
+          {label}
+        </span>
+        {required && <span className="text-red-500 ml-0.5">*</span>}
+      </p>
+      {error && <p className="text-red-500 text-xs mt-1 text-center">{error}</p>}
     </div>
   );
 }
 
 // ------------------------------------------------
-// COMPONENTE PRINCIPAL
+// SUB-COMPONENTE: SECCIÓN DE REVISIÓN
 // ------------------------------------------------
-export default function RegistrarConsumidor() {
-  const navigate = useNavigate();
-  const [paso,    setPaso]    = useState(1);
-  const [error,   setError]   = useState("");
-  const [loading, setLoading] = useState(false);
-  const [exito,   setExito]   = useState("");
 
-  const [departamentos, setDepartamentos] = useState<Departamento[]>([]);
-  const [provincias,    setProvincias]    = useState<Provincia[]>([]);
-  const [municipios,    setMunicipios]    = useState<Municipio[]>([]);
+interface ReviewSectionProps {
+  title:  string;
+  items:  [string, string][];
+  onEdit: () => void;
+}
 
-  const [anverso,         setAnverso]         = useState<File | null>(null);
-  const [reverso,         setReverso]         = useState<File | null>(null);
-  const [fotoSosteniendo, setFotoSosteniendo] = useState<File | null>(null);
-
-  const [datosPaso1, setDatosPaso1] = useState<Paso1Data | null>(null);
-  const [datosPaso2, setDatosPaso2] = useState<Paso2Data | null>(null);
-
-  const [showPass,  setShowPass]  = useState(false);
-  const [showPass2, setShowPass2] = useState(false);
-
-  useEffect(() => {
-    catalogosService.getDepartamentos().then(setDepartamentos);
-  }, []);
-
-  const form1 = useForm<Paso1Data>({ resolver: zodResolver(paso1Schema) });
-  const form2 = useForm<Paso2Data>({ resolver: zodResolver(paso2Schema) });
-  const form3 = useForm<Paso3Data>({ resolver: zodResolver(paso3Schema) });
-
-  const onChangeDepartamento = async (id: string) => {
-    form2.setValue("provincia", "");
-    form2.setValue("municipio", "");
-    setMunicipios([]);
-    if (id) setProvincias(await catalogosService.getProvincias(Number(id)));
-  };
-
-  const onChangeProvincia = async (id: string) => {
-    form2.setValue("municipio", "");
-    if (id) setMunicipios(await catalogosService.getMunicipios(Number(id)));
-  };
-
-  const submitPaso1 = form1.handleSubmit(data => { setDatosPaso1(data); setPaso(2); setError(""); });
-  const submitPaso2 = form2.handleSubmit(data => { setDatosPaso2(data); setPaso(3); setError(""); });
-  const submitPaso3 = form3.handleSubmit(() => { setPaso(4); setError(""); });
-
-  const submitFinal = async () => {
-    if (!anverso || !reverso || !fotoSosteniendo) {
-      setError("Debes subir las 3 fotografías del documento.");
-      return;
-    }
-    if (!datosPaso1 || !datosPaso2) return;
-
-    const pass3 = form3.getValues();
-    setLoading(true); setError("");
-
-    try {
-      const formData = new FormData();
-      formData.append("tipo_documento",        datosPaso1.tipo_documento);
-      formData.append("numero_documento",       datosPaso1.numero_documento);
-      formData.append("complemento_documento",  datosPaso1.complemento_documento ?? "");
-      formData.append("nombres",                datosPaso1.nombres);
-      formData.append("apellido_paterno",       datosPaso1.apellido_paterno);
-      formData.append("apellido_materno",       datosPaso1.apellido_materno ?? "");
-      formData.append("fecha_nacimiento",       datosPaso1.fecha_nacimiento);
-      formData.append("email",       datosPaso2.email);
-      formData.append("celular",     datosPaso2.celular);
-      formData.append("departamento", datosPaso2.departamento);
-      formData.append("provincia",   datosPaso2.provincia);
-      formData.append("municipio",   datosPaso2.municipio);
-      formData.append("actividad",   datosPaso2.actividad);
-      formData.append("direccion",   datosPaso2.direccion);
-      formData.append("password",    pass3.password);
-      formData.append("password2",   pass3.password2);
-      formData.append("anverso",          anverso);
-      formData.append("reverso",          reverso);
-      formData.append("foto_sosteniendo", fotoSosteniendo);
-
-      await api.post("/api/users/registro/consumidor/", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-
-      setExito(
-        `Consumidor registrado exitosamente. Se envió un PIN de verificación a ${datosPaso2.email}`
-      );
-    } catch (err: unknown) {
-      const e = err as { response?: { data?: Record<string, string[]> | { detail?: string } } };
-      const data = e.response?.data;
-      if (data && "detail" in data) {
-        setError((data as { detail?: string }).detail ?? "Error al registrar.");
-      } else if (data) {
-        const msgs = Object.entries(data as Record<string, unknown>)
-          .map(([k, v]) => `${k}: ${Array.isArray(v) ? v[0] : String(v)}`)
-          .join(" | ");
-        setError(msgs);
-      } else {
-        setError("Error al registrar el consumidor.");
-      }
-    } finally { setLoading(false); }
-  };
-
-  const inputCls = (hasError: boolean) =>
-    `w-full px-4 py-2.5 rounded-xl border text-sm transition-colors outline-none ${
-      hasError
-        ? "border-red-300 bg-red-50 focus:border-red-400 focus:ring-2 focus:ring-red-100"
-        : "border-border bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card"
-    }`;
-
-  const selectCls = (hasError: boolean) =>
-    `w-full px-4 py-2.5 rounded-xl border text-sm outline-none bg-input ${
-      hasError ? "border-red-300" : "border-border focus:border-primary focus:ring-2 focus:ring-primary/20"
-    }`;
-
-  const FileInput = ({ label, file, onChange }: { label: string; file: File | null; onChange: (f: File) => void }) => (
-    <div>
-      <label className="block text-sm font-medium text-foreground mb-1.5">{label} *</label>
-      <label className={`flex flex-col items-center justify-center w-full h-24 border-2 border-dashed rounded-xl cursor-pointer transition-colors ${
-        file ? "border-primary bg-state-success-bg" : "border-border bg-input hover:bg-background"
-      }`}>
-        <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden"
-          onChange={e => e.target.files?.[0] && onChange(e.target.files[0])} />
-        {file
-          ? <><CheckCircle className="w-5 h-5 text-primary mx-auto mb-1" /><p className="text-xs text-state-success-fg truncate max-w-[160px]">{file.name}</p></>
-          : <><Upload className="w-5 h-5 text-muted-foreground mx-auto mb-1" /><p className="text-xs text-muted-foreground">JPG, PNG o WebP</p></>
-        }
-      </label>
-    </div>
-  );
-
-  // ÉXITO
-  if (exito) return (
-    <Layout>
-      <div className="max-w-lg mx-auto">
-        <div className="bg-card rounded-2xl border border-border shadow-sm px-8 py-12 text-center">
-          <div className="w-16 h-16 bg-state-success-bg rounded-full flex items-center justify-center mx-auto mb-4">
-            <CheckCircle className="w-8 h-8 text-state-success-fg" />
-          </div>
-          <h2 className="text-xl font-bold text-foreground mb-2">¡Consumidor registrado!</h2>
-          <p className="text-muted-foreground text-sm mb-6">{exito}</p>
-          <div className="flex gap-3 justify-center">
-            <button onClick={() => navigate("/anh/consumidores")}
-              className="px-5 py-2.5 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary-hover transition-colors">
-              Ver consumidores
-            </button>
-            <button onClick={() => { setPaso(1); setExito(""); setDatosPaso1(null); setDatosPaso2(null); form1.reset(); form2.reset(); form3.reset(); setAnverso(null); setReverso(null); setFotoSosteniendo(null); }}
-              className="px-5 py-2.5 border border-border text-muted-foreground rounded-xl text-sm hover:bg-background transition-colors">
-              Registrar otro
-            </button>
-          </div>
-        </div>
-      </div>
-    </Layout>
-  );
-
+function ReviewSection({ title, items, onEdit }: ReviewSectionProps) {
   return (
-    <Layout>
-      <div className="max-w-2xl mx-auto space-y-5">
-
-        {/* HEADER */}
-        <div className="flex items-center gap-3">
-          <button onClick={() => navigate("/anh/consumidores")}
-            className="p-2 rounded-xl border border-border text-muted-foreground hover:bg-card transition-colors">
-            <ArrowLeft className="w-4 h-4" />
-          </button>
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-navbar rounded-xl flex items-center justify-center">
-              <UserPlus className="w-5 h-5 text-navbar-foreground" />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-foreground">Registrar consumidor</h1>
-              <p className="text-muted-foreground text-sm">El consumidor recibirá un PIN de verificación por correo</p>
-            </div>
-          </div>
-        </div>
-
-        {/* FORMULARIO */}
-        <div className="bg-card rounded-2xl border border-border shadow-sm overflow-hidden">
-          <div className="px-8 py-6">
-            <PasoIndicador actual={paso} />
-
-            {error && (
-              <div className="flex items-start gap-3 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 mb-5 text-sm">
-                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" /> <span>{error}</span>
-              </div>
-            )}
-
-            {/* PASO 1 */}
-            {paso === 1 && (
-              <form onSubmit={submitPaso1} className="space-y-4">
-                <h3 className="font-semibold text-foreground text-sm mb-3">Datos de identidad</h3>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="col-span-2">
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Tipo de documento *</label>
-                    <select {...form1.register("tipo_documento")} className={selectCls(!!form1.formState.errors.tipo_documento)}>
-                      <option value="">Seleccionar...</option>
-                      {TIPOS_DOCUMENTO.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                    </select>
-                    {form1.formState.errors.tipo_documento && <p className="text-red-500 text-xs mt-1">{form1.formState.errors.tipo_documento.message}</p>}
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">N° Documento *</label>
-                    <input {...form1.register("numero_documento")} placeholder="Ej: 12345678" inputMode="numeric" maxLength={9}
-                      onInput={e => { (e.target as HTMLInputElement).value = (e.target as HTMLInputElement).value.replace(/[^0-9]/g, ""); }}
-                      className={inputCls(!!form1.formState.errors.numero_documento)} />
-                    {form1.formState.errors.numero_documento && <p className="text-red-500 text-xs mt-1">{form1.formState.errors.numero_documento.message}</p>}
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Complemento</label>
-                    <input {...form1.register("complemento_documento")} placeholder="Ej: 1A" className={inputCls(false)} />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Nombres *</label>
-                    <input {...form1.register("nombres", { onChange: e => { e.target.value = e.target.value.toLowerCase().replace(/[^a-záéíóúüñ ]/g, ""); } })}
-                      placeholder="Nombres" className={inputCls(!!form1.formState.errors.nombres)} />
-                    {form1.formState.errors.nombres && <p className="text-red-500 text-xs mt-1">{form1.formState.errors.nombres.message}</p>}
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Primer apellido *</label>
-                    <input {...form1.register("apellido_paterno", { onChange: e => { e.target.value = e.target.value.toLowerCase().replace(/[^a-záéíóúüñ ]/g, ""); } })}
-                      placeholder="Apellido paterno" className={inputCls(!!form1.formState.errors.apellido_paterno)} />
-                    {form1.formState.errors.apellido_paterno && <p className="text-red-500 text-xs mt-1">{form1.formState.errors.apellido_paterno.message}</p>}
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Segundo apellido</label>
-                    <input {...form1.register("apellido_materno", { onChange: e => { e.target.value = e.target.value.toLowerCase().replace(/[^a-záéíóúüñ ]/g, ""); } })}
-                      placeholder="Apellido materno" className={inputCls(false)} />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Fecha de nacimiento *</label>
-                    <input type="date" {...form1.register("fecha_nacimiento")} className={inputCls(!!form1.formState.errors.fecha_nacimiento)} />
-                    {form1.formState.errors.fecha_nacimiento && <p className="text-red-500 text-xs mt-1">{form1.formState.errors.fecha_nacimiento.message}</p>}
-                  </div>
-                </div>
-                <div className="flex justify-end pt-2">
-                  <button type="submit" className="flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary-hover transition-colors">
-                    Siguiente <ChevronRight className="w-4 h-4" />
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {/* PASO 2 */}
-            {paso === 2 && (
-              <form onSubmit={submitPaso2} className="space-y-4">
-                <h3 className="font-semibold text-foreground text-sm mb-3">Datos generales</h3>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="col-span-2">
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Correo electrónico *</label>
-                    <input type="email" {...form2.register("email", { onChange: e => { e.target.value = e.target.value.toLowerCase(); } })}
-                      placeholder="ejemplo@correo.com" className={inputCls(!!form2.formState.errors.email)} />
-                    {form2.formState.errors.email && <p className="text-red-500 text-xs mt-1">{form2.formState.errors.email.message}</p>}
-                  </div>
-                  <div className="col-span-2">
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Celular *</label>
-                    <input {...form2.register("celular")} placeholder="Ej: 70000000" className={inputCls(!!form2.formState.errors.celular)} />
-                    {form2.formState.errors.celular && <p className="text-red-500 text-xs mt-1">{form2.formState.errors.celular.message}</p>}
-                  </div>
-                  <div className="col-span-2">
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Departamento *</label>
-                    <select {...form2.register("departamento")} onChange={e => { form2.setValue("departamento", e.target.value); onChangeDepartamento(e.target.value); }}
-                      className={selectCls(!!form2.formState.errors.departamento)}>
-                      <option value="">Seleccionar...</option>
-                      {departamentos.map(d => <option key={d.id} value={d.id}>{d.nombre}</option>)}
-                    </select>
-                    {form2.formState.errors.departamento && <p className="text-red-500 text-xs mt-1">{form2.formState.errors.departamento.message}</p>}
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Provincia *</label>
-                    <select {...form2.register("provincia")} onChange={e => { form2.setValue("provincia", e.target.value); onChangeProvincia(e.target.value); }}
-                      className={selectCls(!!form2.formState.errors.provincia)} disabled={provincias.length === 0}>
-                      <option value="">Seleccionar...</option>
-                      {provincias.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
-                    </select>
-                    {form2.formState.errors.provincia && <p className="text-red-500 text-xs mt-1">{form2.formState.errors.provincia.message}</p>}
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Municipio *</label>
-                    <select {...form2.register("municipio")} className={selectCls(!!form2.formState.errors.municipio)} disabled={municipios.length === 0}>
-                      <option value="">Seleccionar...</option>
-                      {municipios.map(m => <option key={m.id} value={m.id}>{m.nombre}</option>)}
-                    </select>
-                    {form2.formState.errors.municipio && <p className="text-red-500 text-xs mt-1">{form2.formState.errors.municipio.message}</p>}
-                  </div>
-                  <div className="col-span-2">
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Actividad económica *</label>
-                    <select {...form2.register("actividad")} className={selectCls(!!form2.formState.errors.actividad)}>
-                      <option value="">Seleccionar...</option>
-                      {Object.entries(ACTIVIDADES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-                    </select>
-                    {form2.formState.errors.actividad && <p className="text-red-500 text-xs mt-1">{form2.formState.errors.actividad.message}</p>}
-                  </div>
-                  <div className="col-span-2">
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">Dirección *</label>
-                    <input {...form2.register("direccion")} placeholder="Calle, N°, Barrio..." maxLength={100} className={inputCls(!!form2.formState.errors.direccion)} />
-                    {form2.formState.errors.direccion && <p className="text-red-500 text-xs mt-1">{form2.formState.errors.direccion.message}</p>}
-                  </div>
-                </div>
-                <div className="flex justify-between pt-2">
-                  <button type="button" onClick={() => setPaso(1)} className="flex items-center gap-2 px-4 py-2.5 border border-border text-muted-foreground rounded-xl text-sm hover:bg-background transition-colors">
-                    <ChevronLeft className="w-4 h-4" /> Anterior
-                  </button>
-                  <button type="submit" className="flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary-hover transition-colors">
-                    Siguiente <ChevronRight className="w-4 h-4" />
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {/* PASO 3 */}
-            {paso === 3 && (
-              <form onSubmit={submitPaso3} className="space-y-4">
-                <h3 className="font-semibold text-foreground text-sm mb-3">Contraseña de acceso</h3>
-                <div>
-                  <label className="block text-xs font-medium text-muted-foreground mb-1">Contraseña *</label>
-                  <div className="relative">
-                    <input type={showPass ? "text" : "password"} {...form3.register("password")}
-                      placeholder="Mínimo 8 caracteres" className={inputCls(!!form3.formState.errors.password) + " pr-11"} />
-                    <button type="button" onClick={() => setShowPass(!showPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
-                      {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  {form3.formState.errors.password && <p className="text-red-500 text-xs mt-1">{form3.formState.errors.password.message}</p>}
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted-foreground mb-1">Repetir contraseña *</label>
-                  <div className="relative">
-                    <input type={showPass2 ? "text" : "password"} {...form3.register("password2")}
-                      placeholder="Repite la contraseña" className={inputCls(!!form3.formState.errors.password2) + " pr-11"} />
-                    <button type="button" onClick={() => setShowPass2(!showPass2)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
-                      {showPass2 ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  {form3.formState.errors.password2 && <p className="text-red-500 text-xs mt-1">{form3.formState.errors.password2.message}</p>}
-                </div>
-                <div className="flex justify-between pt-2">
-                  <button type="button" onClick={() => setPaso(2)} className="flex items-center gap-2 px-4 py-2.5 border border-border text-muted-foreground rounded-xl text-sm hover:bg-background transition-colors">
-                    <ChevronLeft className="w-4 h-4" /> Anterior
-                  </button>
-                  <button type="submit" className="flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary-hover transition-colors">
-                    Siguiente <ChevronRight className="w-4 h-4" />
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {/* PASO 4 */}
-            {paso === 4 && (
-              <div className="space-y-4">
-                <h3 className="font-semibold text-foreground text-sm mb-1">Fotografías del documento</h3>
-                <p className="text-xs text-muted-foreground mb-4">Sube fotos claras del documento de identidad del consumidor.</p>
-                <div className="grid grid-cols-1 gap-4">
-                  <FileInput label="Anverso (frente)" file={anverso} onChange={setAnverso} />
-                  <FileInput label="Reverso (dorso)"  file={reverso} onChange={setReverso} />
-                  <FileInput label="Foto sosteniendo el documento" file={fotoSosteniendo} onChange={setFotoSosteniendo} />
-                </div>
-                <div className="flex justify-between pt-2">
-                  <button type="button" onClick={() => setPaso(3)} className="flex items-center gap-2 px-4 py-2.5 border border-border text-muted-foreground rounded-xl text-sm hover:bg-background transition-colors">
-                    <ChevronLeft className="w-4 h-4" /> Anterior
-                  </button>
-                  <button onClick={submitFinal} disabled={loading}
-                    className="flex items-center gap-2 px-5 py-2.5 bg-primary hover:bg-primary-hover disabled:bg-slate-300 disabled:cursor-not-allowed text-primary-foreground rounded-xl text-sm font-medium transition-colors">
-                    {loading
-                      ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      : <CheckCircle className="w-4 h-4" />
-                    }
-                    {loading ? "Registrando..." : "Crear cuenta"}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
+    <div className="border border-border rounded-xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{title}</h3>
+        <button
+          type="button"
+          onClick={onEdit}
+          className="text-xs font-medium text-primary hover:text-primary-hover transition-colors"
+        >
+          Editar
+        </button>
       </div>
-    </Layout>
+      <div className="space-y-2">
+        {items.map(([label, value]) => (
+          <div key={label} className="flex justify-between text-sm gap-4">
+            <span className="text-muted-foreground shrink-0">{label}</span>
+            <span className="text-foreground font-medium text-right truncate">{value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
