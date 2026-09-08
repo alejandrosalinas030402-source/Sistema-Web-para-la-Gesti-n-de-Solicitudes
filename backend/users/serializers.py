@@ -8,6 +8,11 @@ from rest_framework import serializers
 
 from .models import User, PerfilFuncionario, TokenVerificacion
 
+# Reutiliza el generador de contraseñas temporales del flujo de
+# registro por admin. serializers_admin solo importa de .models,
+# así que no hay riesgo de import circular.
+from .serializers_admin import _generar_password_temporal
+
 
 # ------------------------------------------------
 # SERIALIZER BASE (LECTURA)
@@ -104,6 +109,12 @@ class CrearFuncionarioSerializer(serializers.Serializer):
     """
     Usado por el administrador para crear funcionarios
     de tipo ADMIN, ANH o ESS en un solo paso.
+
+    La contraseña NO la elige el administrador: la genera el backend
+    y se devuelve una sola vez en la respuesta, igual que en el
+    registro de consumidores por admin. El funcionario queda obligado
+    a cambiarla en su primer ingreso (requiere_cambio_password=True),
+    de modo que el administrador no conserva acceso a su cuenta.
     """
 
     # --- Datos de User ---
@@ -122,11 +133,6 @@ class CrearFuncionarioSerializer(serializers.Serializer):
             User.TipoUsuario.ANH,
             User.TipoUsuario.ESS,
         ]
-    )
-    password = serializers.CharField(
-        write_only=True,
-        min_length=8,
-        style={"input_type": "password"}
     )
 
     # --- Datos de PerfilFuncionario ---
@@ -212,9 +218,14 @@ class CrearFuncionarioSerializer(serializers.Serializer):
     @transaction.atomic
     def create(self, validated_data):
 
+        # El backend genera la contraseña temporal: el administrador
+        # nunca la elige y por tanto no queda conociendo la clave
+        # permanente del funcionario.
+        password = _generar_password_temporal()
+
         user_fields = [
             "email", "nombres", "apellido_paterno",
-            "apellido_materno", "tipo_usuario", "password",
+            "apellido_materno", "tipo_usuario",
         ]
         perfil_fields = [
             "tipo_documento", "numero_documento", "complemento_documento",
@@ -225,15 +236,19 @@ class CrearFuncionarioSerializer(serializers.Serializer):
         user_data   = {k: validated_data[k] for k in user_fields}
         perfil_data = {k: validated_data[k] for k in perfil_fields if k in validated_data}
 
-        password = user_data.pop("password")
         user = User(**user_data)
         user.set_password(password)
-        user.estado_cuenta    = User.EstadoCuenta.ACTIVO
-        user.email_verificado = True
+        user.estado_cuenta            = User.EstadoCuenta.ACTIVO
+        user.email_verificado         = True
+        user.requiere_cambio_password = True
         user.full_clean()
         user.save()
 
         PerfilFuncionario.objects.create(user=user, **perfil_data)
+
+        # No persiste: solo viaja hasta la view para incluirla
+        # en la respuesta y que el admin pueda comunicarla.
+        user._password_temporal = password
 
         return user
 

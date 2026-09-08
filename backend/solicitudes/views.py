@@ -112,6 +112,8 @@ class SolicitudViewSet(
         ).prefetch_related(
             # Auditoría: se muestra en el detalle
             "auditoria__usuario",
+            # Documentos del consumidor: el listado ESS muestra el CI
+            "consumidor__documentos",
         )
         if user.tipo_usuario in ["ANH", "ADMIN"]:
             return base_qs

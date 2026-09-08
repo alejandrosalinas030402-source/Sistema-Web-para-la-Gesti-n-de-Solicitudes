@@ -43,6 +43,13 @@ const ESTADOS_CUENTA: { value: EstadoCuenta | ""; label: string }[] = [
   { value: "PENDIENTE_VERIFICACION", label: "Pendiente verificación" },
 ];
 
+// Coincide con PerfilFuncionario.TipoDocumento del backend.
+const TIPOS_DOC: { value: TipoDocumento; label: string }[] = [
+  { value: "CI",         label: "Cédula de Identidad" },
+  { value: "PASAPORTE",  label: "Pasaporte" },
+  { value: "EXTRANJERO", label: "Carnet de Extranjero" },
+];
+
 const rolColor: Record<string, string> = {
   ANH:   "bg-blue-100 text-blue-700",
   ESS:   "bg-purple-100 text-purple-700",
@@ -240,6 +247,20 @@ export default function GestionUsuarios() {
       setErrorForm("Completa email, nombres y apellido paterno.");
       return;
     }
+
+    // El backend crea un PerfilFuncionario para todo funcionario y
+    // exige estos cuatro campos. Validarlos aquí evita un 400 tras
+    // llenar el formulario entero.
+    if (!editando && (
+      !form.cargo.trim() ||
+      !form.unidad_departamento.trim() ||
+      !form.numero_funcionario.trim() ||
+      !form.numero_documento.trim()
+    )) {
+      setErrorForm("Completa cargo, unidad, N° funcionario y N° documento.");
+      return;
+    }
+
     if (form.tipo_usuario === "ESS" && !form.estacion_servicio_id && !editando) {
       setErrorForm("Los usuarios ESS deben tener una estación asignada.");
       return;
@@ -249,19 +270,17 @@ export default function GestionUsuarios() {
     try {
       if (editando) {
         const payload: EditarFuncionarioPayload = {
-          nombres:          form.nombres,
-          apellido_paterno: form.apellido_paterno,
-          apellido_materno: form.apellido_materno,
+          nombres:             form.nombres,
+          apellido_paterno:    form.apellido_paterno,
+          apellido_materno:    form.apellido_materno,
+          cargo:               form.cargo,
+          unidad_departamento: form.unidad_departamento,
+          numero_funcionario:  form.numero_funcionario,
+          tipo_documento:      form.tipo_documento,
+          numero_documento:    form.numero_documento,
+          celular:             form.celular,
         };
-        // Perfil (para ANH y ESS)
-        if (form.tipo_usuario === "ANH" || form.tipo_usuario === "ESS") {
-          payload.cargo               = form.cargo;
-          payload.unidad_departamento = form.unidad_departamento;
-          payload.numero_funcionario  = form.numero_funcionario;
-          payload.tipo_documento      = form.tipo_documento;
-          payload.numero_documento    = form.numero_documento;
-          payload.celular             = form.celular;
-        }
+        // Solo se envía si se eligió una nueva: enviar 0 borraría la actual.
         if (form.tipo_usuario === "ESS" && form.estacion_servicio_id) {
           payload.estacion_servicio_id = form.estacion_servicio_id;
         }
@@ -270,39 +289,47 @@ export default function GestionUsuarios() {
         setModalForm(false);
       } else {
         const payload: CrearFuncionarioPayload = {
-          email: form.email, nombres: form.nombres,
-          apellido_paterno: form.apellido_paterno,
-          apellido_materno: form.apellido_materno,
-          tipo_usuario:     form.tipo_usuario,
+          email:               form.email,
+          nombres:             form.nombres,
+          apellido_paterno:    form.apellido_paterno,
+          apellido_materno:    form.apellido_materno,
+          tipo_usuario:        form.tipo_usuario,
+          // Datos de perfil: obligatorios para los tres roles.
+          cargo:               form.cargo,
+          unidad_departamento: form.unidad_departamento,
+          numero_funcionario:  form.numero_funcionario,
+          tipo_documento:      form.tipo_documento,
+          numero_documento:    form.numero_documento,
+          celular:             form.celular,
         };
-        if (form.tipo_usuario === "ANH" || form.tipo_usuario === "ESS") {
-          payload.cargo               = form.cargo;
-          payload.unidad_departamento = form.unidad_departamento;
-          payload.numero_funcionario  = form.numero_funcionario;
-          payload.tipo_documento      = form.tipo_documento;
-          payload.numero_documento    = form.numero_documento;
-          payload.celular             = form.celular;
-        }
         if (form.tipo_usuario === "ESS") {
-          payload.estacion_servicio_id = form.estacion_servicio_id;
+          payload.estacion_servicio = form.estacion_servicio_id;
         }
+
         const res = await usersService.crear(payload);
         setModalForm(false);
         setPassVisible(false);
         setModalPassword({
-          email: res.email,
+          email:    res.email,
           password: res.password_temporal,
         });
       }
       await cargar();
     } catch (err: unknown) {
-      const e = err as { response?: { data?: Record<string, string[] | string> } };
+      const e = err as { response?: { data?: unknown } };
       const d = e.response?.data;
-      if (d) {
-        setErrorForm(Object.entries(d).map(([k, v]) => `${k}: ${Array.isArray(v) ? v[0] : v}`).join(" | "));
-      } else {
-        setErrorForm("Error al guardar el usuario.");
+      let msg = "Error al guardar el usuario.";
+      if (typeof d === "string") {
+        msg = d;
+      } else if (d && typeof d === "object") {
+        const entries = Object.entries(d as Record<string, unknown>);
+        if (entries.length > 0) {
+          msg = entries
+            .map(([k, v]) => `${k}: ${Array.isArray(v) ? v[0] : String(v)}`)
+            .join(" | ");
+        }
       }
+      setErrorForm(msg);
     } finally { setGuardando(false); }
   };
 
@@ -328,7 +355,6 @@ export default function GestionUsuarios() {
   };
 
   const inputCls = "w-full px-4 py-2.5 rounded-xl border border-border text-sm bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card outline-none";
-  const necesitaPerfil = form.tipo_usuario === "ANH" || form.tipo_usuario === "ESS";
 
   return (
     <Layout>
@@ -509,42 +535,48 @@ export default function GestionUsuarios() {
             </div>
           </div>
 
-          {/* Perfil funcional (ANH y ESS) */}
-          {necesitaPerfil && (
-            <div className="border border-border rounded-xl p-4 bg-background/50 space-y-3">
-              <p className="text-xs font-medium text-foreground">Datos del funcionario</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-muted-foreground mb-1">Cargo</label>
-                  <input value={form.cargo} onChange={e => setForm(f => ({ ...f, cargo: e.target.value }))} className={inputCls} placeholder="Ej: Analista" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted-foreground mb-1">Unidad / Departamento</label>
-                  <input value={form.unidad_departamento} onChange={e => setForm(f => ({ ...f, unidad_departamento: e.target.value }))} className={inputCls} />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted-foreground mb-1">N° funcionario</label>
-                  <input value={form.numero_funcionario} onChange={e => setForm(f => ({ ...f, numero_funcionario: e.target.value }))} className={inputCls} placeholder="Ej: ANH-001" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted-foreground mb-1">Celular</label>
-                  <input value={form.celular} onChange={e => setForm(f => ({ ...f, celular: e.target.value }))} className={inputCls} />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted-foreground mb-1">Tipo documento</label>
-                  <select value={form.tipo_documento} onChange={e => setForm(f => ({ ...f, tipo_documento: e.target.value as TipoDocumento }))} className={inputCls}>
-                    <option value="CI">CI</option>
-                    <option value="CIE">CIE</option>
-                    <option value="PASAPORTE">Pasaporte</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted-foreground mb-1">N° documento</label>
-                  <input value={form.numero_documento} onChange={e => setForm(f => ({ ...f, numero_documento: e.target.value }))} className={inputCls} />
-                </div>
+          {/* Datos del funcionario — el backend los exige para los tres roles */}
+          <div className="border border-border rounded-xl p-4 bg-background/50 space-y-3">
+            <p className="text-xs font-medium text-foreground">Datos del funcionario</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Cargo *</label>
+                <input value={form.cargo} onChange={e => setForm(f => ({ ...f, cargo: e.target.value }))} className={inputCls} placeholder="Ej: Analista" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Unidad / Departamento *</label>
+                <input value={form.unidad_departamento} onChange={e => setForm(f => ({ ...f, unidad_departamento: e.target.value }))} className={inputCls} />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">N° funcionario *</label>
+                <input value={form.numero_funcionario} onChange={e => setForm(f => ({ ...f, numero_funcionario: e.target.value }))} className={inputCls} placeholder="Ej: ANH-001" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Celular</label>
+                <input
+                  value={form.celular}
+                  onChange={e => setForm(f => ({ ...f, celular: e.target.value }))}
+                  className={inputCls}
+                  inputMode="numeric"
+                  placeholder="Ej: 78123456"
+                  onInput={e => {
+                    const el = e.target as HTMLInputElement;
+                    el.value = el.value.replace(/\D/g, "");
+                  }}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Tipo documento *</label>
+                <select value={form.tipo_documento} onChange={e => setForm(f => ({ ...f, tipo_documento: e.target.value as TipoDocumento }))} className={inputCls}>
+                  {TIPOS_DOC.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">N° documento *</label>
+                <input value={form.numero_documento} onChange={e => setForm(f => ({ ...f, numero_documento: e.target.value }))} className={inputCls} />
               </div>
             </div>
-          )}
+          </div>
 
           {/* Cascada geográfica solo para ESS */}
           {form.tipo_usuario === "ESS" && (

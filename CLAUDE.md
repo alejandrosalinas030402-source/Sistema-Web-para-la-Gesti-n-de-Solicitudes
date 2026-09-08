@@ -1,0 +1,136 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project overview
+
+ANH Bolivia — sistema de gestión de solicitudes de combustible subvencionado. Monorepo con dos proyectos independientes:
+
+- `backend/` — Django REST Framework API
+- `frontend/` — React + TypeScript SPA (Vite)
+
+## Commands
+
+### Backend (`backend/`)
+
+```bash
+python manage.py runserver          # dev server (http://127.0.0.1:8000)
+python manage.py migrate            # apply migrations
+python manage.py makemigrations     # create migrations after model changes
+python manage.py test               # run all tests
+python manage.py test solicitudes   # run tests for one app
+python manage.py test solicitudes.tests.ClassName.test_method  # single test
+python manage.py runcrons           # manually trigger cron jobs (see below)
+python manage.py createsuperuser
+```
+
+Requires a `.env` file in `backend/` (not committed) with at least `DJANGO_SECRET_KEY`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`. Database is PostgreSQL — there's no SQLite fallback configured.
+
+### Frontend (`frontend/`)
+
+```bash
+npm run dev       # dev server (http://127.0.0.1:5173)
+npm run build     # tsc -b && vite build
+npm run lint      # eslint .
+npm run preview   # preview production build
+```
+
+No test runner is configured in `frontend/package.json`.
+
+## Architecture
+
+### Backend — Django apps
+
+Located in `backend/`, one directory per app, standard Django layout (`models.py`, `serializers.py`, `views.py`, `urls.py`, `permissions.py`, `migrations/`) plus project-specific additions:
+
+- **`core/`** — project settings/urls/wsgi/asgi. Not a Django "app" with models.
+- **`users/`** — custom `User` model (`AUTH_USER_MODEL = "users.User"`), authentication (login/refresh/logout, email verification via PIN, password recovery), and the RBAC permission base classes every other app builds on (`permissions.py`). Also owns `email_service.py` (Brevo HTTP API in prod, console backend in dev) and `authentication.py` (`CookieJWTAuthentication`).
+- **`consumidores/`** — consumer profile and identity documents.
+- **`estaciones/`** — gas stations (estaciones de servicio) CRUD and status.
+- **`solicitudes/`** — the core domain: fuel request lifecycle. Business logic lives in **`services/`** (one file per operation: `aprobar_solicitud.py`, `rechazar_solicitud.py`, `despachar_solicitud.py`, `observar_solicitud.py`, `generar_comprobante.py`, `generar_declaracion_jurada.py`, `verificar_repetitividad.py`, `registrar_auditoria.py`, report generators) rather than in `views.py` — views call into these services. Also has `cron.py` (scheduled jobs, e.g. hourly expiration of approved-but-unclaimed requests — run manually via `python manage.py runcrons` or `expirar_solicitudes` management command), `views_dashboard.py`, `views_estadisticas.py`, `views_reportes.py` as separate view modules beyond the default `views.py`, and `filters.py` for `django-filter` querysets.
+- **`configuracion/`** and **`catalogos/`** — app-wide settings and reference/lookup data (catálogos have `fixtures/`).
+
+Routing (`core/urls.py`) mounts apps under `/api/<app>/...` and documents the generated routes inline as comments above each `include()`. When adding endpoints, follow that same comment convention.
+
+### Auth model
+
+JWT via `djangorestframework_simplejwt`, but tokens travel as **httponly cookies** (`access_token` / `refresh_token`), not just headers — see `CookieJWTAuthentication` in `users/authentication.py`, which reads the cookie and falls back to the `Authorization: Bearer` header. Access token lifetime is 30 min, refresh 1 day, with rotation + blacklisting enabled. Cookie `SameSite` is `Lax` in dev and `None` (cross-site, frontend on Vercel / backend on Railway) in production.
+
+### Roles / permissions
+
+Four roles on `User.TipoUsuario`: `ADMIN`, `ANH`, `ESS` (estación de servicio), `CONS` (consumidor). `users/permissions.py` defines the base classes (`IsAuthenticatedActive` → `HasRole` → `IsAdmin`, `IsANH`, `IsAdminOrANH`, `IsESS`, `IsConsumidor`, `IsAdminOrANHOrESS`); other apps subclass these per-view/per-object rather than checking roles inline (e.g. `solicitudes/permissions.py` wraps them as `EsConsumidor`, `EsUsuarioANH`, `EsEstacionAsignada` with object-level checks). Follow this pattern for any new role-gated endpoint instead of writing ad hoc role checks in views.
+
+### Deployment
+
+Frontend deploys to Vercel (`vercel.json`), backend to Railway (`Procfile`: gunicorn + `migrate` on release, `whitenoise` for static files, `dj-database-url`/`DATABASE_URL` when present, else discrete `DB_*` env vars).
+
+### Frontend structure (`frontend/src/`)
+
+- **`context/AuthContext.tsx`** — owns the single axios instance (`export const api`), auth state, and the token-refresh interceptor. All API calls should reuse this `api` instance (see `services/*.service.ts`), not create their own axios client. Access token is kept in memory + `localStorage`; refresh happens transparently on a 401 via `/api/users/auth/refresh/` (excluded from retry: login/refresh/logout URLs themselves).
+- **`services/*.service.ts`** — one file per backend app, thin wrappers around `api.get/post/...` returning typed responses. This is the only layer that should call `api` directly from page code.
+- **`pages/`** — routed screens, split by role: `admin/`, `anh/`, `consumidor/`, `estacion/`, plus top-level public pages (`Login.tsx`, `RecuperarPassword.tsx`, etc.). Role-specific pages are lazy-loaded in `App.tsx`.
+- **`App.tsx`** — all routing lives here. Routes are wrapped in `<ProtectedRoute allowedRoles={[...]}>`; `RoleRedirect` sends an authenticated user from `/` to their role's home page (`tipo_usuario` → route mapping mirrors the backend's `TipoUsuario` choices).
+- **`components/ui/`** — the shared component kit (see below).
+- **`types/`** and **`utils/constants.ts`** — TS types and shared enums/labels mirroring backend choices (e.g. `ESTADOS_SOLICITUD`, `ESTADOS_IDENTIDAD`, `ALERTAS_CONSUMIDOR` label/color maps consumed by `EstadoBadge.tsx`).
+
+### `src/components/ui/` conventions
+
+Plain function components, no UI library (no shadcn/radix) — every component is hand-rolled and small:
+
+- Props typed with a local `interface Props` (or `<Name>Props` for larger components like `Button`), `children?: ReactNode`, and always a `className = ""` passthrough appended last in the class string so callers can override/extend styles.
+- Variant/size styling is done via `Record<string, string>` lookup objects (`variants`, `sizes`) keyed by a prop, not `clsx`/`cva` or conditional ternary chains — follow this table pattern when adding a new variant.
+- File header comment is just the relative path, e.g. `// src/components/ui/Button.tsx`.
+- Compound components live in one file and are exported individually (e.g. `Card`, `CardHeader`, `CardBody` all in `Card.tsx`).
+- Icons come from `lucide-react`.
+- Domain-specific badges (`EstadoBadge.tsx`) wrap the generic `Badge` and look up label/color from the `utils/constants.ts` maps rather than hardcoding strings — extend those maps, don't add new badge components for new statuses.
+
+### Tailwind setup and palette
+
+Tailwind v4 (`@tailwindcss/vite` plugin, no `tailwind.config.js`). The theme is defined with CSS custom properties in an `@theme` block in `src/index.css` — **add new design tokens there**, not by hardcoding hex values in components. Current semantic tokens (used as `bg-*`/`text-*`/`border-*` utilities):
+
+| Token | Value | Usage |
+|---|---|---|
+| `navbar`, `navbar-foreground`, `navbar-muted` | `#17212B` / `#FFFFFF` / `#94A3B8` | top navigation bar |
+| `primary`, `primary-hover`, `primary-foreground` | `#10B981` / `#059669` / `#FFFFFF` | brand green, primary actions |
+| `background` | `#F8FAFC` | page background |
+| `card` | `#FFFFFF` | `Card`, `Modal` surfaces |
+| `foreground` | `#111827` | primary text |
+| `muted-foreground` | `#6B7280` | secondary text |
+| `border` | `#E5E7EB` | `border-border` on cards/dividers/inputs |
+| `input` | `#F8FAFC` | form input background |
+| `ring` | `#10B981` | focus rings |
+| `state-pending-bg` / `state-pending-fg` | `#FEF3C7` / `#92400E` | pending badges |
+| `state-success-bg` / `state-success-fg` | `#D1FAE5` / `#065F46` | success/approved badges |
+| `state-warning-bg` / `state-warning-fg` | `#FFEDD5` / `#9A3412` | warning/observed badges |
+| `state-danger-bg` / `state-danger-fg` | `#FEE2E2` / `#991B1B` | danger/rejected badges |
+
+The `state-*` pairs exist specifically for status badges (`EstadoBadge.tsx`, `Stepper.tsx`) — use them for any new status/estado UI instead of raw Tailwind colors (`bg-red-100`, etc.), which only appear as one-off exceptions (e.g. `Button`'s `danger` variant currently uses `bg-red-600`).
+
+## Working guidelines
+
+- Respond in Spanish.
+- Before writing code that references model fields, serializer
+  fields, or API response shapes, read the actual file. Do not
+  infer field names from context or from the frontend types.
+- When a page needs a new status color, extend the `state-*`
+  tokens in `index.css` and the label/color maps in
+  `utils/constants.ts`. Do not use raw Tailwind colors
+  (`bg-red-100`, `bg-amber-500`) for status UI.
+- Alerts and success messages auto-dismiss after 4s via a
+  `flash()` helper backed by a `useRef` timer. Follow that
+  pattern instead of leaving messages pinned.
+- Tables: rows are clickable (navigate on row click, ChevronRight
+  on hover). Do not add a separate "Ver" button column.
+- Status filters are horizontal tabs, not dropdowns.
+- Back navigation uses `navigate(-1)`, never a hardcoded route.
+- Prefer editing existing files over creating new ones.
+- Do not commit unless explicitly asked.
+
+## Current work
+
+Branch `feature/rediseno-ess`. In progress: ESS role redesign.
+Done: dispatch view (`pages/estacion/Solicitudes.tsx`).
+Next: dispatch history page, ESS profile page with password change.
+
+Known issues tracked separately — ask before assuming something
+is a bug vs. intentional.

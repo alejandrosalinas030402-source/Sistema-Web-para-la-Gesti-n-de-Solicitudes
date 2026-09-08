@@ -3,6 +3,19 @@
 import { api } from "../context/AuthContext";
 import type { Solicitud, SolicitudCreate } from "../types/solicitud.types";
 
+interface PaginatedResponse {
+  results: Solicitud[];
+  next:    string | null;
+}
+
+async function fetchPage(
+  url: string,
+  params?: Record<string, string>
+): Promise<PaginatedResponse> {
+  const res = await api.get(url, params ? { params } : undefined);
+  return res.data;
+}
+
 export const solicitudesService = {
 
   // ---- CONSUMIDOR ----
@@ -171,5 +184,28 @@ export const solicitudesService = {
       observacion:       data.observacion ?? "",
     });
     return res.data;
+  },
+
+  // Recorre todas las páginas de DRF y acumula el historial completo
+  // de despachos (estado=DESPACHADA) para el período pedido. La pantalla
+  // de Historial necesita ver todos los registros del período —tanto
+  // para las métricas de resumen como para la búsqueda local—, no solo
+  // la primera página.
+  getTodasDespachadas: async (params?: Record<string, string>): Promise<Solicitud[]> => {
+    let url: string | null = "/api/solicitudes/";
+    let currentParams: Record<string, string> | undefined = {
+      estado: "DESPACHADA",
+      ...params,
+    };
+    const acumulado: Solicitud[] = [];
+
+    while (url) {
+      const page = await fetchPage(url, currentParams);
+      acumulado.push(...page.results);
+      url = page.next;
+      currentParams = undefined;
+    }
+
+    return acumulado;
   },
 };

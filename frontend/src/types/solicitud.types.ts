@@ -57,6 +57,7 @@ export interface Solicitud {
   departamento_nombre?:          string;
   provincia_nombre?:             string;
   municipio_nombre?:             string;
+  consumidor_documento?:         string | null;
 }
 
 export interface ConsumidorResumen {

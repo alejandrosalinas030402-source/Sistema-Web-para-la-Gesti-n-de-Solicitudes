@@ -1,357 +1,443 @@
 // src/pages/estacion/Solicitudes.tsx
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import Layout from "../../components/Layout";
-import { EstadoSolicitudBadge } from "../../components/ui/EstadoBadge";
+import { Card } from "../../components/ui/Card";
+import { Button } from "../../components/ui/Button";
+import { Alert } from "../../components/ui/Alert";
+import { Spinner } from "../../components/ui/Spinner";
+import { Modal } from "../../components/ui/Modal";
 import { solicitudesService } from "../../services/solicitudes.service";
 import type { Solicitud } from "../../types/solicitud.types";
 import { COMBUSTIBLES } from "../../utils/constants";
 import { formatFecha, formatIdPublico } from "../../utils/format";
 import { useAuth } from "../../context/AuthContext";
+import type { LucideIcon } from "lucide-react";
 import {
-  FileText, RefreshCw, AlertCircle, CheckCircle,
-  Search, Truck, X, Droplets, Clock, AlertTriangle,
-  CheckCircle2
+  FileText, RefreshCw, Search, Truck, Droplets,
+  Clock, AlertTriangle, CheckCircle2, ChevronDown, IdCard,
 } from "lucide-react";
 
 // ------------------------------------------------
-// HELPER — días restantes hasta vencimiento
+// CONSTANTES
 // ------------------------------------------------
-const tiempoRestante = (fecha: string | null): {
-  horas: number;
-  urgencia: "ok" | "advertencia" | "critico" | "vencido"
-} => {
+
+const AUTO_REFRESH_MS = 60_000;   // La estación recibe aprobaciones nuevas
+                                  // mientras el operador trabaja.
+const ALERT_TIMEOUT   = 5000;
+
+// ------------------------------------------------
+// HELPER — urgencia según tiempo restante
+// ------------------------------------------------
+
+type Urgencia = "ok" | "advertencia" | "critico" | "vencido";
+
+const tiempoRestante = (fecha: string | null): { horas: number; urgencia: Urgencia } => {
   if (!fecha) return { horas: 0, urgencia: "ok" };
   const diff  = new Date(fecha).getTime() - Date.now();
   const horas = Math.floor(diff / (1000 * 60 * 60));
 
-  if (diff <= 0)   return { horas: 0, urgencia: "vencido"     };
-  if (horas <= 6)  return { horas,    urgencia: "critico"      };
-  if (horas <= 24) return { horas,    urgencia: "advertencia"  };
-  return             { horas,          urgencia: "ok"           };
+  if (diff <= 0)   return { horas: 0, urgencia: "vencido" };
+  if (horas <= 6)  return { horas,    urgencia: "critico" };
+  if (horas <= 24) return { horas,    urgencia: "advertencia" };
+  return             { horas,          urgencia: "ok" };
 };
 
-const urgenciaConfig = {
-  ok:          { color: "bg-state-success-bg border-state-success-fg/20", badge: "bg-state-success-bg text-state-success-fg", icono: CheckCircle2,  texto: "h" },
-  advertencia: { color: "bg-amber-50 border-amber-200",                   badge: "bg-amber-100 text-amber-700",               icono: Clock,          texto: "h" },
-  critico:     { color: "bg-red-50 border-red-200",                       badge: "bg-red-100 text-red-700",                   icono: AlertTriangle,  texto: "h restantes" },
-  vencido:     { color: "bg-background border-border",                    badge: "bg-background text-muted-foreground",        icono: AlertTriangle,  texto: "Vencida" },
+// El acento de urgencia va en el borde izquierdo, no en el fondo:
+// así la tarjeta mantiene fondo blanco y el CI del consumidor
+// (el dato que el operador coteja) queda legible.
+const urgenciaConfig: Record<Urgencia, {
+  borde: string; chip: string; icono: LucideIcon; label: (h: number) => string;
+}> = {
+  ok: {
+    borde: "border-l-primary",
+    chip:  "bg-state-success-bg text-state-success-fg",
+    icono: CheckCircle2,
+    label: h => `${h}h`,
+  },
+  advertencia: {
+    borde: "border-l-state-warning-fg",
+    chip:  "bg-state-warning-bg text-state-warning-fg",
+    icono: Clock,
+    label: h => `${h}h`,
+  },
+  critico: {
+    borde: "border-l-state-danger-fg",
+    chip:  "bg-state-danger-bg text-state-danger-fg",
+    icono: AlertTriangle,
+    label: h => `${h}h restantes`,
+  },
+  vencido: {
+    borde: "border-l-border",
+    chip:  "bg-background text-muted-foreground",
+    icono: AlertTriangle,
+    label: () => "Vencida",
+  },
 };
+
+// ------------------------------------------------
+// COMPONENTE PRINCIPAL
+// ------------------------------------------------
 
 export default function SolicitudesESS() {
-  const { user }  = useAuth();
-  const [solicitudes, setSolicitudes] = useState<Solicitud[]>([]);
-  const [loading,     setLoading]     = useState(true);
-  const [error,       setError]       = useState("");
-  const [exito,       setExito]       = useState("");
-  const [busqueda,    setBusqueda]    = useState("");
+  const { user } = useAuth();
+
+  const [solicitudes,   setSolicitudes]   = useState<Solicitud[]>([]);
+  const [loading,       setLoading]       = useState(true);
+  const [refrescando,   setRefrescando]   = useState(false);
+  const [errorPagina,   setErrorPagina]   = useState("");
+  const [despachadasHoy, setDespachadasHoy] = useState(0);
+  const [busqueda,      setBusqueda]      = useState("");
   const [mostrarVencidas, setMostrarVencidas] = useState(false);
 
+  // Alerta de éxito con auto-dismiss
+  const [exito, setExito] = useState("");
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flashExito = (msg: string) => {
+    setExito(msg);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setExito(""), ALERT_TIMEOUT);
+  };
+
+  // Modal de despacho — mantiene su propio error para no
+  // mezclarlo con el de la página.
   const [modalSolicitud,    setModalSolicitud]    = useState<Solicitud | null>(null);
-  const [litrosDespachados, setLitrosDespachados] = useState<number>(0);
+  const [litrosDespachados, setLitrosDespachados] = useState(0);
   const [observacion,       setObservacion]       = useState("");
   const [despachando,       setDespachando]       = useState(false);
+  const [errorModal,        setErrorModal]        = useState("");
 
-  const cargar = async () => {
-    setLoading(true); setError("");
+  // ------------------------------------------------
+  // CARGA DE DATOS
+  // ------------------------------------------------
+
+  const cargar = useCallback(async (silencioso = false) => {
+    if (silencioso) setRefrescando(true); else setLoading(true);
+    setErrorPagina("");
     try {
-      const params: Record<string, string> = {
-        estado:   "APROBADA",
-        ordering: "fecha_expiracion",
-      };
-      if (busqueda) params.search = busqueda;
-      const res = await solicitudesService.getAll(params);
-      setSolicitudes(res.results ?? res as unknown as Solicitud[]);
-    } catch {
-      setError("Error al cargar las solicitudes.");
-    } finally { setLoading(false); }
-  };
+      const hoy = new Date().toISOString().slice(0, 10);
 
-  useEffect(() => { cargar(); }, []);
+      const [pendientes, despachadas] = await Promise.all([
+        solicitudesService.getAll({ estado: "APROBADA", ordering: "fecha_expiracion" }),
+        solicitudesService.getAll({ estado: "DESPACHADA", despacho_desde: hoy }),
+      ]);
+
+      setSolicitudes(pendientes.results ?? []);
+      setDespachadasHoy(despachadas.count ?? 0);
+    } catch {
+      setErrorPagina("Error al cargar las solicitudes.");
+    } finally {
+      setLoading(false);
+      setRefrescando(false);
+    }
+  }, []);
+
+  useEffect(() => { cargar(); }, [cargar]);
+
+  // Auto-refresh silencioso: no muestra spinner ni pierde la
+  // posición de scroll mientras el operador atiende.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (!modalSolicitud) cargar(true);
+    }, AUTO_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [cargar, modalSolicitud]);
+
+  // ------------------------------------------------
+  // FILTRADO LOCAL
+  // Instantáneo mientras el operador escribe — con un cliente
+  // esperando, pulsar "Buscar" y esperar al backend sobra.
+  // ------------------------------------------------
 
   const { vigentes, vencidas } = useMemo(() => {
+    const q = busqueda.trim().toLowerCase();
+
+    const coincide = (s: Solicitud) => {
+      if (!q) return true;
+      return (
+        s.id_publico.toLowerCase().includes(q) ||
+        (s.consumidor_nombre ?? "").toLowerCase().includes(q) ||
+        (s.consumidor_documento ?? "").toLowerCase().includes(q)
+      );
+    };
+
     const v:  Solicitud[] = [];
     const ve: Solicitud[] = [];
-    solicitudes.forEach(s => {
-      const { urgencia } = tiempoRestante(s.fecha_expiracion);
-      if (urgencia === "vencido") ve.push(s);
+
+    solicitudes.filter(coincide).forEach(s => {
+      if (tiempoRestante(s.fecha_expiracion).urgencia === "vencido") ve.push(s);
       else v.push(s);
     });
-    v.sort((a, b) => {
-      const ta = new Date(a.fecha_expiracion ?? "").getTime();
-      const tb = new Date(b.fecha_expiracion ?? "").getTime();
-      return ta - tb;
-    });
-    return { vigentes: v, vencidas: ve };
-  }, [solicitudes]);
 
-  const totalLitrosPendientes = vigentes.reduce(
-    (acc, s) => acc + (s.litros_aprobados ?? 0), 0
-  );
-  const solicitudesUrgentes = vigentes.filter(s =>
-    tiempoRestante(s.fecha_expiracion).urgencia === "critico"
+    v.sort((a, b) =>
+      new Date(a.fecha_expiracion ?? "").getTime() -
+      new Date(b.fecha_expiracion ?? "").getTime()
+    );
+
+    return { vigentes: v, vencidas: ve };
+  }, [solicitudes, busqueda]);
+
+  const totalLitros = vigentes.reduce((acc, s) => acc + (s.litros_aprobados ?? 0), 0);
+  const urgentes    = vigentes.filter(
+    s => tiempoRestante(s.fecha_expiracion).urgencia === "critico"
   ).length;
 
-  const onBuscar = (e: React.FormEvent) => {
-    e.preventDefault();
-    cargar();
-  };
+  // ------------------------------------------------
+  // DESPACHO
+  // ------------------------------------------------
 
   const abrirDespacho = (s: Solicitud) => {
     setModalSolicitud(s);
     setLitrosDespachados(s.litros_aprobados ?? 0);
     setObservacion("");
-    setError("");
+    setErrorModal("");
   };
 
   const confirmarDespacho = async () => {
     if (!modalSolicitud) return;
-    const maxLitros = modalSolicitud.litros_aprobados ?? 0;
-    if (litrosDespachados <= 0) { setError("Ingresa los litros despachados."); return; }
-    if (litrosDespachados > maxLitros) { setError(`No puedes despachar más de ${maxLitros} L aprobados.`); return; }
+    const max = modalSolicitud.litros_aprobados ?? 0;
 
-    setDespachando(true); setError("");
+    if (!Number.isInteger(litrosDespachados) || litrosDespachados <= 0) {
+      setErrorModal("Ingresa una cantidad válida de litros.");
+      return;
+    }
+    if (litrosDespachados > max) {
+      setErrorModal(`No puedes despachar más de ${max} L aprobados.`);
+      return;
+    }
+
+    setDespachando(true);
+    setErrorModal("");
     try {
       await solicitudesService.despachar(modalSolicitud.id_publico, {
         litros_despachados: litrosDespachados,
         observacion,
       });
-      setExito(`Solicitud #${formatIdPublico(modalSolicitud.id_publico)} despachada — ${litrosDespachados} L de ${COMBUSTIBLES[modalSolicitud.tipo_combustible_aprobado ?? ""] ?? "combustible"}.`);
+      const combustible = COMBUSTIBLES[modalSolicitud.tipo_combustible_aprobado ?? ""] ?? "combustible";
+      flashExito(
+        `Despacho registrado — #${formatIdPublico(modalSolicitud.id_publico)} · ${litrosDespachados} L de ${combustible}.`
+      );
       setModalSolicitud(null);
-      await cargar();
+      await cargar(true);
     } catch (err: unknown) {
-      const e = err as { response?: { data?: { detail?: string } } };
-      const detail = e.response?.data?.detail;
-      setError(Array.isArray(detail) ? detail[0] : (detail ?? "Error al despachar la solicitud."));
-    } finally { setDespachando(false); }
+      const e = err as { response?: { data?: unknown } };
+      const d = e.response?.data;
+      let msg = "Error al despachar la solicitud.";
+      if (typeof d === "string") {
+        msg = d;
+      } else if (d && typeof d === "object") {
+        const entries = Object.entries(d as Record<string, unknown>);
+        if (entries.length > 0) {
+          msg = entries.map(([, v]) => (Array.isArray(v) ? v[0] : String(v))).join(" | ");
+        }
+      }
+      setErrorModal(msg);
+    } finally {
+      setDespachando(false);
+    }
   };
 
   const inputCls = "w-full px-4 py-2.5 rounded-xl border border-border text-sm bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card outline-none";
 
   // ------------------------------------------------
-  // CARD DE SOLICITUD
+  // TARJETA DE SOLICITUD
   // ------------------------------------------------
+
   const SolicitudCard = ({ s }: { s: Solicitud }) => {
     const { horas, urgencia } = tiempoRestante(s.fecha_expiracion);
     const cfg = urgenciaConfig[urgencia];
-    const IconoUrgencia = cfg.icono;
+    const Icono = cfg.icono;
     const esVencida = urgencia === "vencido";
 
     return (
-      <div className={`rounded-2xl border shadow-sm overflow-hidden transition-all ${cfg.color}`}>
-        <div className="px-5 py-4 flex items-start justify-between">
-          <div className="flex items-start gap-3">
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-              esVencida ? "bg-border" : "bg-state-success-bg"
-            }`}>
-              <FileText className={`w-5 h-5 ${esVencida ? "text-muted-foreground" : "text-state-success-fg"}`} />
+      <div className={`bg-card rounded-xl border border-border border-l-4 ${cfg.borde} shadow-sm overflow-hidden`}>
+        <div className="px-4 py-3 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-mono font-semibold text-foreground">
+                #{formatIdPublico(s.id_publico)}
+              </span>
+              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.chip}`}>
+                <Icono className="w-3 h-3" />
+                {cfg.label(horas)}
+              </span>
             </div>
-            <div>
-              <div className="flex items-center gap-2 mb-1 flex-wrap">
-                <p className="font-semibold text-foreground text-sm">
-                  #{formatIdPublico(s.id_publico)}
-                </p>
-                <EstadoSolicitudBadge estado={s.estado} />
-                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.badge}`}>
-                  <IconoUrgencia className="w-3 h-3" />
-                  {esVencida ? "Vencida" : `${horas}${cfg.texto}`}
+
+            <p className="text-sm font-medium text-foreground mt-1.5">
+              {s.consumidor_nombre ?? "—"}
+            </p>
+
+            {/* El CI es el dato que el operador coteja contra
+                el documento físico: se muestra destacado. */}
+            {s.consumidor_documento && (
+              <div className="inline-flex items-center gap-1.5 mt-1.5 bg-background border border-border rounded-lg px-2.5 py-1">
+                <IdCard className="w-3.5 h-3.5 text-muted-foreground" />
+                <span className="text-sm font-semibold text-foreground tracking-wide">
+                  {s.consumidor_documento}
                 </span>
               </div>
-              <p className="text-sm text-foreground font-medium">
-                {(s as any).consumidor_nombre ?? s.consumidor?.nombre_completo ?? "—"}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {(s as any).consumidor_email ?? s.consumidor?.email ?? "—"}
-              </p>
-            </div>
+            )}
+
+            <p className="text-xs text-muted-foreground mt-1.5">
+              Válido hasta {formatFecha(s.fecha_expiracion, true)}
+              {s.uso_combustible ? ` · ${s.uso_combustible}` : ""}
+            </p>
           </div>
 
-          {/* LITROS APROBADOS */}
           <div className="text-right shrink-0">
-            <p className={`text-2xl font-bold ${esVencida ? "text-muted-foreground" : "text-state-success-fg"}`}>
+            <p className={`text-2xl font-bold leading-none ${esVencida ? "text-muted-foreground" : "text-state-success-fg"}`}>
               {s.litros_aprobados ?? "—"} L
             </p>
-            <p className="text-xs text-muted-foreground">
-              {COMBUSTIBLES[s.tipo_combustible_aprobado ?? ""] ?? s.tipo_combustible_aprobado ?? "—"}
+            <p className="text-xs text-muted-foreground mt-1.5">
+              {COMBUSTIBLES[s.tipo_combustible_aprobado ?? ""] ?? "—"}
             </p>
             <p className="text-xs text-muted-foreground">aprobados</p>
           </div>
         </div>
 
-        {/* DETALLES */}
-        <div className="px-5 pb-3 grid grid-cols-3 gap-3 border-t border-white/50 pt-3">
-          <div>
-            <p className="text-xs text-muted-foreground">Fecha aprobación</p>
-            <p className="text-xs font-medium text-foreground">{formatFecha(s.fecha_aprobacion)}</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Válido hasta</p>
-            <p className={`text-xs font-medium ${
-              urgencia === "critico"     ? "text-red-600"   :
-              urgencia === "advertencia" ? "text-amber-600" :
-              urgencia === "vencido"     ? "text-muted-foreground" : "text-state-success-fg"
-            }`}>
-              {formatFecha(s.fecha_expiracion, true)}
-            </p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Uso declarado</p>
-            <p className="text-xs text-foreground truncate">{s.uso_combustible || "—"}</p>
-          </div>
-        </div>
-
-        {/* BOTÓN DESPACHAR */}
-        {!esVencida && (
-          <div className="px-5 py-3 border-t border-white/50">
-            <button
+        <div className="px-4 py-2.5 border-t border-border bg-background/50 flex items-center justify-between gap-3">
+          <span className="text-xs text-muted-foreground">
+            Aprobada {formatFecha(s.fecha_aprobacion)}
+          </span>
+          {esVencida ? (
+            <span className="text-xs text-muted-foreground">No se puede despachar</span>
+          ) : (
+            <Button
+              variant={urgencia === "critico" ? "danger" : "primary"}
+              size="sm"
+              icon={<Truck className="w-4 h-4" />}
               onClick={() => abrirDespacho(s)}
-              className={`flex items-center gap-2 px-5 py-2.5 text-white rounded-xl text-sm font-medium transition-colors ${
-                urgencia === "critico"
-                  ? "bg-red-600 hover:bg-red-700"
-                  : "bg-primary hover:bg-primary-hover"
-              }`}
             >
-              <Truck className="w-4 h-4" />
-              {urgencia === "critico" ? "¡Despachar urgente!" : "Registrar despacho"}
-            </button>
-          </div>
-        )}
+              {urgencia === "critico" ? "Despachar urgente" : "Registrar despacho"}
+            </Button>
+          )}
+        </div>
       </div>
     );
   };
+
+  // ------------------------------------------------
+  // STAT CARD
+  // ------------------------------------------------
+
+  const Stat = ({ icon: Icon, valor, label, alarma }: {
+    icon: LucideIcon; valor: string | number; label: string; alarma?: boolean;
+  }) => (
+    <div className={`rounded-xl border shadow-sm p-4 ${
+      alarma ? "bg-state-danger-bg border-state-danger-fg/20" : "bg-card border-border"
+    }`}>
+      <div className="flex items-center gap-3">
+        <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+          alarma ? "bg-state-danger-fg/10" : "bg-primary/10"
+        }`}>
+          <Icon className={`w-4 h-4 ${alarma ? "text-state-danger-fg" : "text-primary"}`} />
+        </div>
+        <div className="min-w-0">
+          <p className={`text-xl font-bold leading-none ${alarma ? "text-state-danger-fg" : "text-foreground"}`}>
+            {valor}
+          </p>
+          <p className="text-xs text-muted-foreground mt-1 truncate">{label}</p>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <Layout>
       <div className="space-y-5">
 
         {/* TÍTULO */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-navbar rounded-xl flex items-center justify-center">
               <Truck className="w-5 h-5 text-navbar-foreground" />
             </div>
             <div>
               <h1 className="text-2xl font-bold text-foreground">Solicitudes para despacho</h1>
-              <p className="text-muted-foreground text-sm">{user?.nombres} — {vigentes.length} vigente(s)</p>
+              <p className="text-muted-foreground text-sm">
+                {user?.estacion_nombre ?? "Estación"} · {vigentes.length} vigente(s)
+              </p>
             </div>
           </div>
-          <button onClick={cargar} className="flex items-center gap-2 px-4 py-2 border border-border text-muted-foreground rounded-xl text-sm hover:bg-card transition-colors">
-            <RefreshCw className="w-4 h-4" /> Actualizar
-          </button>
+          <div className="flex items-center gap-3">
+            <span className="hidden sm:flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span className="w-1.5 h-1.5 rounded-full bg-state-success-fg" />
+              Actualiza cada 60s
+            </span>
+            <Button
+              variant="outline"
+              icon={<RefreshCw className="w-4 h-4" />}
+              loading={refrescando}
+              onClick={() => cargar(true)}
+            >
+              Actualizar
+            </Button>
+          </div>
         </div>
 
         {/* STATS */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <div className="bg-card rounded-2xl border border-border shadow-sm p-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 bg-primary/10 rounded-xl flex items-center justify-center">
-                <FileText className="w-4 h-4 text-primary" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-foreground">{vigentes.length}</p>
-                <p className="text-xs text-muted-foreground">Pendientes</p>
-              </div>
-            </div>
-          </div>
-          <div className="bg-card rounded-2xl border border-border shadow-sm p-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 bg-state-success-bg rounded-xl flex items-center justify-center">
-                <Droplets className="w-4 h-4 text-state-success-fg" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-foreground">{totalLitrosPendientes} L</p>
-                <p className="text-xs text-muted-foreground">Por despachar</p>
-              </div>
-            </div>
-          </div>
-          <div className={`rounded-2xl border shadow-sm p-4 ${solicitudesUrgentes > 0 ? "bg-red-50 border-red-200" : "bg-card border-border"}`}>
-            <div className="flex items-center gap-3">
-              <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${solicitudesUrgentes > 0 ? "bg-red-100" : "bg-background"}`}>
-                <AlertTriangle className={`w-4 h-4 ${solicitudesUrgentes > 0 ? "text-red-600" : "text-muted-foreground"}`} />
-              </div>
-              <div>
-                <p className={`text-xl font-bold ${solicitudesUrgentes > 0 ? "text-red-600" : "text-foreground"}`}>{solicitudesUrgentes}</p>
-                <p className="text-xs text-muted-foreground">Urgentes (&lt;6h)</p>
-              </div>
-            </div>
-          </div>
-          <div className="bg-card rounded-2xl border border-border shadow-sm p-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 bg-background rounded-xl flex items-center justify-center">
-                <Clock className="w-4 h-4 text-muted-foreground" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-muted-foreground">{vencidas.length}</p>
-                <p className="text-xs text-muted-foreground">Vencidas</p>
-              </div>
-            </div>
-          </div>
+          <Stat icon={FileText}      valor={vigentes.length}   label="Pendientes" />
+          <Stat icon={Droplets}      valor={`${totalLitros} L`} label="Por despachar" />
+          <Stat icon={AlertTriangle} valor={urgentes}          label="Urgentes (<6h)" alarma={urgentes > 0} />
+          <Stat icon={CheckCircle2}  valor={despachadasHoy}    label="Despachadas hoy" />
         </div>
 
         {/* ALERTAS */}
-        {solicitudesUrgentes > 0 && (
-          <div className="flex items-start gap-3 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
-            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-            <span>
-              <strong>{solicitudesUrgentes} solicitud(es)</strong> vencen en menos de 6 horas.
-              Despáchalas a la brevedad posible.
-            </span>
-          </div>
+        {urgentes > 0 && (
+          <Alert
+            type="warning"
+            message={`${urgentes} solicitud(es) vencen en menos de 6 horas. Despáchalas a la brevedad.`}
+          />
         )}
-        {error && !modalSolicitud && (
-          <div className="flex items-center gap-3 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
-            <AlertCircle className="w-4 h-4 shrink-0" /> {error}
-          </div>
-        )}
-        {exito && (
-          <div className="flex items-center gap-3 bg-state-success-bg border border-state-success-fg/20 text-state-success-fg rounded-xl px-4 py-3 text-sm">
-            <CheckCircle className="w-4 h-4 shrink-0" /> {exito}
-          </div>
-        )}
+        {errorPagina && <Alert type="error"   message={errorPagina} />}
+        {exito       && <Alert type="success" message={exito} />}
 
         {/* BÚSQUEDA */}
-        <div className="bg-card rounded-2xl border border-border shadow-sm p-4">
-          <form onSubmit={onBuscar} className="flex gap-2">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-              <input
-                value={busqueda}
-                onChange={e => setBusqueda(e.target.value)}
-                placeholder="Buscar por N° solicitud o consumidor..."
-                className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-border text-sm bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card outline-none"
-              />
-            </div>
-            <button type="submit" className="px-4 py-2.5 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary-hover transition-colors">
-              Buscar
-            </button>
-          </form>
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <input
+            value={busqueda}
+            onChange={e => setBusqueda(e.target.value)}
+            placeholder="Buscar por N° solicitud, nombre o CI..."
+            className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-border text-sm bg-card focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none"
+          />
         </div>
 
-        {/* LISTA VIGENTES */}
+        {/* LISTA */}
         {loading ? (
           <div className="flex items-center justify-center py-16">
-            <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+            <Spinner size="lg" />
           </div>
         ) : vigentes.length === 0 && vencidas.length === 0 ? (
-          <div className="bg-card rounded-2xl border border-border shadow-sm text-center py-16">
-            <CheckCircle className="w-12 h-12 text-primary mx-auto mb-3" />
-            <p className="text-foreground font-semibold">Sin solicitudes pendientes</p>
-            <p className="text-muted-foreground text-sm mt-1">Todas las solicitudes han sido despachadas.</p>
-          </div>
+          <Card>
+            <div className="text-center py-16 px-4">
+              <CheckCircle2 className="w-12 h-12 text-state-success-fg mx-auto mb-3" />
+              <p className="text-foreground font-semibold">
+                {busqueda ? "Sin resultados" : "Sin solicitudes pendientes"}
+              </p>
+              <p className="text-muted-foreground text-sm mt-1">
+                {busqueda
+                  ? `Ninguna solicitud coincide con "${busqueda}".`
+                  : "Todas las solicitudes asignadas han sido despachadas."}
+              </p>
+            </div>
+          </Card>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-3">
             {vigentes.map(s => <SolicitudCard key={s.id_publico} s={s} />)}
           </div>
         )}
 
-        {/* SECCIÓN VENCIDAS */}
+        {/* VENCIDAS */}
         {vencidas.length > 0 && (
           <div>
             <button
-              onClick={() => setMostrarVencidas(!mostrarVencidas)}
-              className="flex items-center gap-2 text-muted-foreground hover:text-foreground text-sm transition-colors"
+              onClick={() => setMostrarVencidas(v => !v)}
+              className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
             >
-              <Clock className="w-4 h-4" />
+              <ChevronDown className={`w-4 h-4 transition-transform ${mostrarVencidas ? "rotate-180" : ""}`} />
               {mostrarVencidas ? "Ocultar" : "Mostrar"} {vencidas.length} solicitud(es) vencida(s)
             </button>
             {mostrarVencidas && (
@@ -363,95 +449,104 @@ export default function SolicitudesESS() {
         )}
       </div>
 
-      {/* MODAL DESPACHO */}
-      {modalSolicitud && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setModalSolicitud(null)} />
-          <div className="relative bg-card rounded-2xl shadow-2xl w-full max-w-md">
+      {/* MODAL DE DESPACHO */}
+      <Modal
+        open={!!modalSolicitud}
+        onClose={() => setModalSolicitud(null)}
+        title="Registrar despacho"
+        size="sm"
+      >
+        {modalSolicitud && (
+          <div className="space-y-4">
 
-            <div className="flex items-center justify-between px-6 py-4 border-b border-border">
-              <h3 className="font-semibold text-foreground">Registrar despacho</h3>
-              <button onClick={() => setModalSolicitud(null)} className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-background transition-colors">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="px-6 py-5 space-y-4">
-              {/* INFO */}
-              <div className="bg-background rounded-xl p-4 space-y-2">
-                {[
-                  ["N° Solicitud", `#${formatIdPublico(modalSolicitud.id_publico)}`],
-                  ["Consumidor", (modalSolicitud as any).consumidor_nombre ?? modalSolicitud.consumidor?.nombre_completo ?? "—"],
-                  ["Válido hasta", formatFecha(modalSolicitud.fecha_expiracion, true)],
-                  ["Combustible", COMBUSTIBLES[modalSolicitud.tipo_combustible_aprobado ?? ""] ?? "—"],
-                ].map(([label, valor]) => (
-                  <div key={label} className="flex justify-between">
-                    <span className="text-xs text-muted-foreground">{label}</span>
-                    <span className="text-xs font-medium text-foreground">{valor}</span>
-                  </div>
-                ))}
-                <div className="flex justify-between items-center pt-1 border-t border-border">
-                  <span className="text-xs text-muted-foreground">Litros aprobados</span>
-                  <span className="text-lg font-bold text-primary">{modalSolicitud.litros_aprobados ?? "—"} L</span>
-                </div>
-              </div>
-
-              {error && (
-                <div className="flex items-center gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-3 py-2 text-xs">
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0" /> {error}
+            {/* Verificación de identidad */}
+            <div className="bg-background border border-border rounded-xl p-4">
+              <p className="text-xs text-muted-foreground mb-2">
+                Verifica que el documento coincida con el titular
+              </p>
+              <p className="text-sm font-medium text-foreground">
+                {modalSolicitud.consumidor_nombre ?? "—"}
+              </p>
+              {modalSolicitud.consumidor_documento && (
+                <div className="inline-flex items-center gap-1.5 mt-2 bg-card border border-border rounded-lg px-3 py-1.5">
+                  <IdCard className="w-4 h-4 text-muted-foreground" />
+                  <span className="text-base font-semibold text-foreground tracking-wide">
+                    {modalSolicitud.consumidor_documento}
+                  </span>
                 </div>
               )}
 
-              <div>
-                <label className="block text-sm font-medium text-foreground mb-1.5">
-                  Litros despachados *
-                </label>
-                <input
-                  type="number"
-                  min={1}
-                  max={modalSolicitud.litros_aprobados ?? 120}
-                  value={litrosDespachados}
-                  onChange={e => setLitrosDespachados(Number(e.target.value))}
-                  className={inputCls}
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  Máximo: {modalSolicitud.litros_aprobados ?? "—"} L aprobados
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-foreground mb-1.5">
-                  Observación (opcional)
-                </label>
-                <textarea
-                  value={observacion}
-                  onChange={e => setObservacion(e.target.value)}
-                  rows={2}
-                  placeholder="Notas sobre el despacho..."
-                  className={inputCls + " resize-none"}
-                />
+              <div className="mt-3 pt-3 border-t border-border space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-xs text-muted-foreground">N° Solicitud</span>
+                  <span className="text-xs font-mono font-medium text-foreground">
+                    #{formatIdPublico(modalSolicitud.id_publico)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-xs text-muted-foreground">Combustible</span>
+                  <span className="text-xs font-medium text-foreground">
+                    {COMBUSTIBLES[modalSolicitud.tipo_combustible_aprobado ?? ""] ?? "—"}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-muted-foreground">Litros aprobados</span>
+                  <span className="text-lg font-bold text-primary">
+                    {modalSolicitud.litros_aprobados ?? "—"} L
+                  </span>
+                </div>
               </div>
             </div>
 
-            <div className="px-6 py-4 border-t border-border flex justify-end gap-3">
-              <button onClick={() => setModalSolicitud(null)} className="px-4 py-2 border border-border text-muted-foreground rounded-xl text-sm hover:bg-background transition-colors">
+            {errorModal && <Alert type="error" message={errorModal} />}
+
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-1.5">
+                Litros despachados *
+              </label>
+              <input
+                type="number"
+                step={1}
+                min={1}
+                max={modalSolicitud.litros_aprobados ?? 120}
+                value={litrosDespachados}
+                onChange={e => setLitrosDespachados(Math.floor(Number(e.target.value)))}
+                className={inputCls}
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Máximo {modalSolicitud.litros_aprobados ?? "—"} L. Si entregas menos, registra la cantidad real.
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-1.5">
+                Observación (opcional)
+              </label>
+              <textarea
+                value={observacion}
+                onChange={e => setObservacion(e.target.value)}
+                rows={2}
+                placeholder="Notas sobre el despacho..."
+                className={inputCls + " resize-none"}
+              />
+            </div>
+
+            <div className="flex justify-end gap-3 pt-1">
+              <Button variant="outline" onClick={() => setModalSolicitud(null)}>
                 Cancelar
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="primary"
+                icon={<Truck className="w-4 h-4" />}
+                loading={despachando}
                 onClick={confirmarDespacho}
-                disabled={despachando}
-                className="flex items-center gap-2 px-5 py-2.5 bg-primary hover:bg-primary-hover disabled:bg-slate-300 disabled:cursor-not-allowed text-primary-foreground rounded-xl text-sm font-medium transition-colors"
               >
-                {despachando
-                  ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  : <Truck className="w-4 h-4" />
-                }
-                {despachando ? "Despachando..." : "Confirmar despacho"}
-              </button>
+                Confirmar despacho
+              </Button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
     </Layout>
   );
 }

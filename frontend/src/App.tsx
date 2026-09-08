@@ -32,6 +32,7 @@ const EstacionesDepartamento = lazy(() => import("./pages/anh/EstacionesDepartam
 const EstacionesProvincia    = lazy(() => import("./pages/anh/EstacionesProvincia"));
 // Páginas ESS
 const SolicitudesESS      = lazy(() => import("./pages/estacion/Solicitudes"));
+const HistorialESS        = lazy(() => import("./pages/estacion/Historial"));
 
 // Loading fallback
 const PageLoader = () => (
@@ -154,6 +155,13 @@ function AppRoutes() {
           element={
             <ProtectedRoute allowedRoles={["ESS"]}>
               <SolicitudesESS />
+            </ProtectedRoute>
+          }
+        />
+        <Route path="/estacion/historial"
+          element={
+            <ProtectedRoute allowedRoles={["ESS"]}>
+              <HistorialESS />
             </ProtectedRoute>
           }
         />

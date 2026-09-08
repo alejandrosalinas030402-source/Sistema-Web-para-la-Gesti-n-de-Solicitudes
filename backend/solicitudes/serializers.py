@@ -114,8 +114,9 @@ class SolicitudSerializer(serializers.ModelSerializer):
 
 class SolicitudListSerializer(serializers.ModelSerializer):
 
-    consumidor_nombre = serializers.SerializerMethodField()
-    consumidor_email  = serializers.SerializerMethodField()
+    consumidor_nombre    = serializers.SerializerMethodField()
+    consumidor_email     = serializers.SerializerMethodField()
+    consumidor_documento = serializers.SerializerMethodField()
 
     class Meta:
         model = Solicitud
@@ -123,14 +124,17 @@ class SolicitudListSerializer(serializers.ModelSerializer):
             "id_publico",
             "consumidor_nombre",
             "consumidor_email",
+            "consumidor_documento",
             "estado",
             "tipo_combustible",
             "tipo_combustible_aprobado",
             "litros_solicitados",
             "litros_aprobados",
+            "litros_despachados",
             "uso_combustible",
             "fecha_aprobacion",
             "fecha_expiracion",
+            "fecha_despacho",
             "fecha_creacion",
         ]
 
@@ -145,6 +149,28 @@ class SolicitudListSerializer(serializers.ModelSerializer):
             return obj.consumidor.user.email
         except Exception:
             return "—"
+
+    def get_consumidor_documento(self, obj):
+        """
+        Documento de identidad del consumidor.
+        Lo necesita el operador ESS para cotejar el CI físico
+        contra el sistema antes de entregar el combustible.
+        """
+        try:
+            # .all() en lugar de .first() para aprovechar el
+            # prefetch_related y no disparar una query por fila.
+            docs = obj.consumidor.documentos.all()
+            if not docs:
+                return None
+            doc = docs[0]
+            partes = [
+                doc.tipo_documento,
+                doc.numero_documento,
+                doc.complemento_documento,
+            ]
+            return " ".join(p for p in partes if p).strip()
+        except Exception:
+            return None
 
 
 # ------------------------------------------------

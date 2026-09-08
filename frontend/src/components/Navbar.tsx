@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
+import type { LucideIcon } from "lucide-react";
 import {
   Flame,
   LayoutDashboard,
@@ -16,19 +17,21 @@ import {
   X,
   ChevronDown,
   UserCog,
+  History,
 } from "lucide-react";
 
 // ------------------------------------------------
 // NAVEGACIÓN POR ROL
 // ------------------------------------------------
 
-const navItems: Record<string, { label: string; path: string; icon: any }[]> = {
+const navItems: Record<string, { label: string; path: string; icon: LucideIcon }[]> = {
   CONS: [
     { label: "Mi Solicitud",  path: "/consumidor/solicitud", icon: FileText },
     { label: "Mi Perfil",     path: "/consumidor/perfil",    icon: User },
   ],
   ESS: [
     { label: "Solicitudes",   path: "/estacion/solicitudes", icon: FileText },
+    { label: "Historial",     path: "/estacion/historial",   icon: History },
   ],
   ANH: [
     { label: "Dashboard",     path: "/anh/dashboard",        icon: LayoutDashboard },
