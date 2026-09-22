@@ -225,6 +225,17 @@ class Solicitud(models.Model):
         blank=True,
     )
 
+    observacion_despacho = models.TextField(
+        blank=True,
+        default="",
+        verbose_name="Observación de despacho",
+        help_text=(
+            "Nota del operador ESS al registrar el despacho (ej. despacho "
+            "parcial, incidencia). Campo propio: antes de 2026-09 se guardaba "
+            "por error en observacion_anh, pisando la observación de la ANH."
+        ),
+    )
+
     # ------------------------------------------------
     # AUDITORÍA DE USUARIOS
     # ------------------------------------------------

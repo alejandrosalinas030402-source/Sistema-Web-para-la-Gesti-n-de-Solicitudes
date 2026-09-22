@@ -95,6 +95,16 @@ class SolicitudViewSet(
     # ------------------------------------------------
 
     def get_queryset(self):
+        # Solo en list: corrige solicitudes APROBADA/OBSERVADA vencidas
+        # antes de mostrarlas, sin depender de un proceso programado
+        # (ver solicitudes/services/expirar_solicitudes.py). No se
+        # engancha en retrieve ni en las acciones de escritura
+        # (aprobar/despachar/observar/rechazar/cancelar), que ya tienen
+        # su propia transacción y no necesitan esta query de más.
+        if self.action == "list":
+            from .services.expirar_solicitudes import expirar_solicitudes_vencidas_seguro
+            expirar_solicitudes_vencidas_seguro()
+
         user = self.request.user
         base_qs = Solicitud.objects.select_related(
             # Consumidor + su usuario (evita N+1 al llamar consumidor.user.nombre)
@@ -112,6 +122,8 @@ class SolicitudViewSet(
         ).prefetch_related(
             # Auditoría: se muestra en el detalle
             "auditoria__usuario",
+            # Documentos del consumidor: el listado ESS muestra el CI
+            "consumidor__documentos",
         )
         if user.tipo_usuario in ["ANH", "ADMIN"]:
             return base_qs
@@ -347,8 +359,19 @@ class SolicitudViewSet(
         ]:
             raise ValidationError("Solo puedes cancelar solicitudes pendientes u observadas.")
 
+        estado_anterior = solicitud.estado
+
         solicitud.estado = Solicitud.EstadoSolicitud.CANCELADA
         solicitud.save(update_fields=["estado", "fecha_actualizacion"])
+
+        from .services.registrar_auditoria import registrar_cambio_estado
+        registrar_cambio_estado(
+            solicitud       = solicitud,
+            estado_anterior = estado_anterior,
+            estado_nuevo    = Solicitud.EstadoSolicitud.CANCELADA,
+            usuario         = request.user,
+            nota            = "Cancelada por el consumidor.",
+        )
 
         return Response(SolicitudSerializer(solicitud).data, status=status.HTTP_200_OK)
 

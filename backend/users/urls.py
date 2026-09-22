@@ -9,6 +9,7 @@ from .views import (
     FuncionarioListView,
     FuncionarioDetailView,
     FuncionarioCambiarEstadoView,
+    FuncionarioResetearPasswordView,
     LoginView,
     RefreshView,
     LogoutView,
@@ -16,6 +17,7 @@ from .views import (
     SolicitarRecuperacionView,
     RecuperarPasswordView,
     CambiarPasswordView,
+    CambiarPasswordObligatorioView,
     MiPerfilView,
     RegistroConsumidorPorAdminView,
 )
@@ -35,6 +37,7 @@ urlpatterns = [
     path("funcionarios/",          FuncionarioListView.as_view(),      name="funcionarios-list"),
     path("funcionarios/<int:user_id>/",  FuncionarioDetailView.as_view(),    name="funcionario-detail"),
     path("funcionarios/<int:user_id>/cambiar-estado/", FuncionarioCambiarEstadoView.as_view(), name="funcionario-cambiar-estado"),
+    path("funcionarios/<int:user_id>/resetear-password/", FuncionarioResetearPasswordView.as_view(), name="funcionario-resetear-password"),
 
     # ------------------------------------------------
     # AUTENTICACIÓN
@@ -51,5 +54,6 @@ urlpatterns = [
     # PERFIL Y CONTRASEÑA
     # ------------------------------------------------
     path("auth/cambiar-password/",         CambiarPasswordView.as_view(),       name="cambiar-password"),
+    path("auth/cambiar-password-obligatorio/", CambiarPasswordObligatorioView.as_view(), name="cambiar-password-obligatorio"),
     path("me/",                            MiPerfilView.as_view(),              name="mi-perfil"),
 ]

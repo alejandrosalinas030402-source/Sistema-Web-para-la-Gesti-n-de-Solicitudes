@@ -70,4 +70,17 @@ export const authService = {
       password_nuevo2,
     });
   },
+
+  // Cambio forzado cuando requiere_cambio_password=True (contraseña
+  // generada por un admin). Sin password_actual — ver
+  // CambiarPasswordObligatorioView en el backend.
+  cambiarPasswordObligatorio: async (
+    password_nuevo: string,
+    password_nuevo2: string,
+  ): Promise<void> => {
+    await api.post("/api/users/auth/cambiar-password-obligatorio/", {
+      password_nuevo,
+      password_nuevo2,
+    });
+  },
 };

@@ -14,7 +14,7 @@ import { Alert } from "../../components/ui/Alert";
 import { Modal } from "../../components/ui/Modal";
 import {
   Building2, ChevronRight, ArrowLeft, Search, Edit2,
-  User, Mail, Phone, CheckCircle,
+  User, Mail, Phone, CheckCircle, AlertTriangle,
 } from "lucide-react";
 
 interface Operador {
@@ -59,10 +59,12 @@ export default function EstacionesProvincia() {
   const [busqueda,      setBusqueda]      = useState("");
   const [filtroEstado,  setFiltroEstado]  = useState<EstadoEstacion | "">("");
 
-  // Encargado lazy
-  const [expEncargados, setExpEncargados] = useState<Set<number>>(new Set());
-  const [cargandoEncargado, setCargandoEncargado] = useState<Set<number>>(new Set());
-  const [encargadosCache, setEncargadosCache] = useState<Record<number, Operador[]>>({});
+  // Operadores lazy — el conteo ya viene en el listado
+  // (operadores_count); el detalle (nombre/email/celular) se
+  // carga bajo demanda al expandir.
+  const [expOperadores, setExpOperadores] = useState<Set<number>>(new Set());
+  const [cargandoOperadores, setCargandoOperadores] = useState<Set<number>>(new Set());
+  const [operadoresCache, setOperadoresCache] = useState<Record<number, Operador[]>>({});
 
   // Modal editar
   const [modal,     setModal]     = useState(false);
@@ -139,23 +141,23 @@ export default function EstacionesProvincia() {
       .sort((a, b) => a.nombre.localeCompare(b.nombre));
   }, [estacionesFiltradas]);
 
-  // Encargado lazy
-  const toggleEncargado = async (estacionId: number) => {
-    if (expEncargados.has(estacionId)) {
-      const s = new Set(expEncargados); s.delete(estacionId); setExpEncargados(s);
+  // Operadores lazy
+  const toggleOperadores = async (estacionId: number) => {
+    if (expOperadores.has(estacionId)) {
+      const s = new Set(expOperadores); s.delete(estacionId); setExpOperadores(s);
       return;
     }
-    setExpEncargados(prev => new Set(prev).add(estacionId));
-    if (encargadosCache[estacionId]) return;
+    setExpOperadores(prev => new Set(prev).add(estacionId));
+    if (operadoresCache[estacionId]) return;
 
-    setCargandoEncargado(prev => new Set(prev).add(estacionId));
+    setCargandoOperadores(prev => new Set(prev).add(estacionId));
     try {
       const detalle = await estacionesService.getById(estacionId) as EstacionDetalle;
-      setEncargadosCache(prev => ({ ...prev, [estacionId]: detalle.operadores ?? [] }));
+      setOperadoresCache(prev => ({ ...prev, [estacionId]: detalle.operadores ?? [] }));
     } catch {
-      setEncargadosCache(prev => ({ ...prev, [estacionId]: [] }));
+      setOperadoresCache(prev => ({ ...prev, [estacionId]: [] }));
     } finally {
-      setCargandoEncargado(prev => { const s = new Set(prev); s.delete(estacionId); return s; });
+      setCargandoOperadores(prev => { const s = new Set(prev); s.delete(estacionId); return s; });
     }
   };
 
@@ -320,41 +322,52 @@ export default function EstacionesProvincia() {
                         )}
                       </div>
 
-                      {/* Encargado ESS */}
+                      {/* Operadores ESS — el conteo ya viene en el
+                          listado, no hace falta expandir para verlo */}
                       <div className="px-5 py-3 border-t border-border">
-                        <button
-                          onClick={() => toggleEncargado(e.id)}
-                          className="flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary-hover transition-colors"
-                        >
-                          <User className="w-3.5 h-3.5" />
-                          {expEncargados.has(e.id) ? "Ocultar encargado" : "Ver encargado"}
-                        </button>
+                        {(e.operadores_count ?? 0) > 0 ? (
+                          <>
+                            <button
+                              onClick={() => toggleOperadores(e.id)}
+                              className="flex items-center justify-between w-full text-xs font-medium text-primary hover:text-primary-hover transition-colors"
+                            >
+                              <span className="flex items-center gap-1.5">
+                                <User className="w-3.5 h-3.5" />
+                                {e.operadores_count} {e.operadores_count === 1 ? "operador" : "operadores"}
+                              </span>
+                              <ChevronRight className={`w-3.5 h-3.5 transition-transform ${expOperadores.has(e.id) ? "rotate-90" : ""}`} />
+                            </button>
 
-                        {expEncargados.has(e.id) && (
-                          <div className="mt-2 pt-2 border-t border-border">
-                            {cargandoEncargado.has(e.id) ? (
-                              <div className="flex items-center gap-2 py-1">
-                                <Spinner size="sm" /> <span className="text-xs text-muted-foreground">Cargando...</span>
+                            {expOperadores.has(e.id) && (
+                              <div className="mt-2 pt-2 border-t border-border">
+                                {cargandoOperadores.has(e.id) ? (
+                                  <div className="flex items-center gap-2 py-1">
+                                    <Spinner size="sm" /> <span className="text-xs text-muted-foreground">Cargando...</span>
+                                  </div>
+                                ) : (
+                                  (operadoresCache[e.id] ?? []).map(op => (
+                                    <div key={op.id} className="space-y-1 py-2 border-b border-border last:border-0">
+                                      <p className="text-xs font-semibold text-foreground">{op.nombre_completo}</p>
+                                      <p className="text-xs text-muted-foreground">{op.cargo}</p>
+                                      <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                                        <Mail className="w-3 h-3" /> {op.email}
+                                      </p>
+                                      {op.celular && (
+                                        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                                          <Phone className="w-3 h-3" /> {op.celular}
+                                        </p>
+                                      )}
+                                    </div>
+                                  ))
+                                )}
                               </div>
-                            ) : (encargadosCache[e.id]?.length ?? 0) > 0 ? (
-                              encargadosCache[e.id].map(op => (
-                                <div key={op.id} className="space-y-1 py-1">
-                                  <p className="text-xs font-semibold text-foreground">{op.nombre_completo}</p>
-                                  <p className="text-xs text-muted-foreground">{op.cargo}</p>
-                                  <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-                                    <Mail className="w-3 h-3" /> {op.email}
-                                  </p>
-                                  {op.celular && (
-                                    <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-                                      <Phone className="w-3 h-3" /> {op.celular}
-                                    </p>
-                                  )}
-                                </div>
-                              ))
-                            ) : (
-                              <p className="text-xs text-muted-foreground py-1">Sin encargado asignado</p>
                             )}
-                          </div>
+                          </>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-state-warning-bg text-state-warning-fg">
+                            <AlertTriangle className="w-3 h-3" />
+                            Sin operadores asignados
+                          </span>
                         )}
                       </div>
                     </div>

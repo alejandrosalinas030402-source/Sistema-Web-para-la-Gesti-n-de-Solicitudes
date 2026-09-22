@@ -61,3 +61,12 @@ export const ESTADOS_IDENTIDAD: Record<string, { label: string; color: string }>
   VERIFICADO:  { label: "Verificado",  color: "bg-green-100 text-green-700"  },
   RECHAZADO:   { label: "Rechazado",   color: "bg-red-100 text-red-700"      },
 };
+
+// Coincide con User.EstadoCuenta del backend (users/models.py).
+// No confundir con ALERTAS_CONSUMIDOR.BLOQUEADO, que es un estado
+// distinto (alerta de repetitividad de un ConsumidorPerfil).
+export const ESTADOS_CUENTA: Record<string, { label: string; color: string }> = {
+  PENDIENTE:  { label: "Pendiente",  color: "bg-state-pending-bg text-state-pending-fg" },
+  ACTIVO:     { label: "Activo",     color: "bg-state-success-bg text-state-success-fg" },
+  SUSPENDIDO: { label: "Suspendido", color: "bg-state-danger-bg text-state-danger-fg"   },
+};

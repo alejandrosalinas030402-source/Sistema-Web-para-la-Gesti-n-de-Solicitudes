@@ -82,6 +82,9 @@ class UserCreationForm(forms.ModelForm):
     # VALIDACIONES
     # ------------------------------------------------
 
+    def clean_email(self):
+        return self.cleaned_data["email"].lower().strip()
+
     def clean_password2(self):
         password1 = self.cleaned_data.get("password1")
         password2 = self.cleaned_data.get("password2")
@@ -96,12 +99,12 @@ class UserCreationForm(forms.ModelForm):
         tipo_usuario = cleaned_data.get("tipo_usuario")
         estacion     = cleaned_data.get("estacion_servicio")
 
-        # ESS debe tener estación asignada
-        if tipo_usuario == User.TipoUsuario.ESS and not estacion:
-            self.add_error(
-                "estacion_servicio",
-                "Un usuario ESS debe tener una estación asignada."
-            )
+        # ESS puede quedar sin estación asignada (mismo criterio que
+        # PerfilFuncionario.clean() y CrearFuncionarioSerializer — este
+        # form del admin de Django es un segundo camino de alta y tener
+        # reglas distintas para lo mismo según la vía usada es peor
+        # que mantener el chequeo comentado acá para que quede claro
+        # que la ausencia es intencional, no un olvido).
 
         # ADMIN y ANH no deben tener estación
         if (
@@ -184,3 +187,6 @@ class UserChangeForm(forms.ModelForm):
             "is_staff",
             "password",
         ]
+
+    def clean_email(self):
+        return self.cleaned_data["email"].lower().strip()

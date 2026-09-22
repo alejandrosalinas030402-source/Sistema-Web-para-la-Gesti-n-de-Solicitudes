@@ -7,8 +7,14 @@ import { api } from "../context/AuthContext";
 // ------------------------------------------------
 
 export type TipoUsuario  = "ANH" | "ESS" | "ADMIN" | "CONSUMIDOR";
-export type EstadoCuenta = "ACTIVO" | "BLOQUEADO" | "INACTIVO" | "PENDIENTE_VERIFICACION";
-export type TipoDocumento = "CI" | "CIE" | "PASAPORTE";
+
+// Coincide con User.EstadoCuenta del backend (users/models.py).
+export type EstadoCuenta = "PENDIENTE" | "ACTIVO" | "SUSPENDIDO";
+
+// Coincide con PerfilFuncionario.TipoDocumento del backend.
+// Ojo: los funcionarios NO usan "CIE" (eso es de DocumentoIdentidad,
+// el modelo de consumidores).
+export type TipoDocumento = "CI" | "PASAPORTE" | "EXTRANJERO";
 
 export interface PerfilFuncionario {
   id:                  number;
@@ -36,7 +42,10 @@ export interface UserFuncionario {
   perfil:            PerfilFuncionario | null;
 }
 
-// Payload para crear (según serializer del backend)
+// Payload para crear.
+// El backend crea un PerfilFuncionario para TODO funcionario
+// (ADMIN incluido), así que los campos de perfil son obligatorios
+// salvo complemento y celular.
 export interface CrearFuncionarioPayload {
   email:            string;
   nombres:          string;
@@ -44,22 +53,34 @@ export interface CrearFuncionarioPayload {
   apellido_materno?: string;
   tipo_usuario:     "ANH" | "ESS" | "ADMIN";
 
-  // Perfil (obligatorio para ESS y ANH según CrearFuncionarioSerializer)
-  cargo?:               string;
-  unidad_departamento?: string;
-  numero_funcionario?:  string;
-  numero_documento?:    string;
-  tipo_documento?:      TipoDocumento;
+  cargo:                string;
+  unidad_departamento:  string;
+  numero_funcionario:   string;
+  numero_documento:     string;
+  tipo_documento:       TipoDocumento;
   celular?:             string;
-  estacion_servicio_id?: number;
+  complemento_documento?: string;
+
+  // Solo para ESS
+  estacion_servicio?: number;
 }
 
+// La contraseña la genera el backend y solo se devuelve una vez.
 export interface CrearFuncionarioResponse {
-  message:  string;
-  user_id:  number;
-  email:    string;
+  detail:            string;
+  email:             string;
+  tipo_usuario:      string;
   password_temporal: string;
-  aviso:    string;
+  aviso:             string;
+}
+
+// Misma forma que CrearFuncionarioResponse, sin tipo_usuario
+// (el reset no crea una cuenta nueva, no aplica).
+export interface ResetearPasswordResponse {
+  detail:            string;
+  email:             string;
+  password_temporal: string;
+  aviso:             string;
 }
 
 // Payload para editar
@@ -67,7 +88,6 @@ export interface EditarFuncionarioPayload {
   nombres?:          string;
   apellido_paterno?: string;
   apellido_materno?: string;
-  // Perfil
   cargo?:               string;
   unidad_departamento?: string;
   numero_funcionario?:  string;
@@ -86,7 +106,6 @@ export const usersService = {
   // Retorna un array plano (el backend NO pagina este endpoint)
   listar: async (params?: Record<string, string>): Promise<UserFuncionario[]> => {
     const res = await api.get("/api/users/funcionarios/", { params });
-    // Defensivo: por si algún día se pagina, aceptar ambas formas
     const data = res.data;
     if (Array.isArray(data)) return data;
     if (Array.isArray(data?.results)) return data.results;
@@ -103,7 +122,7 @@ export const usersService = {
     return res.data;
   },
 
-  actualizar: async (id: number, payload: EditarFuncionarioPayload): Promise<UserFuncionario> => {
+  actualizar: async (id: number, payload: EditarFuncionarioPayload): Promise<{ detail: string }> => {
     const res = await api.patch(`/api/users/funcionarios/${id}/`, payload);
     return res.data;
   },
@@ -112,6 +131,11 @@ export const usersService = {
     const res = await api.post(`/api/users/funcionarios/${id}/cambiar-estado/`, {
       estado_cuenta: estado,
     });
+    return res.data;
+  },
+
+  resetearPassword: async (id: number): Promise<ResetearPasswordResponse> => {
+    const res = await api.post(`/api/users/funcionarios/${id}/resetear-password/`);
     return res.data;
   },
 };

@@ -1,5 +1,6 @@
 # apps/users/views.py
 import os
+import logging
 from django.db import transaction, IntegrityError
 from django.utils import timezone
 from django.conf import settings
@@ -11,11 +12,14 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import status
 
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
 
 from rest_framework.parsers import MultiPartParser, FormParser
-from .serializers_admin import RegistroConsumidorPorAdminSerializer
+from .serializers_admin import RegistroConsumidorPorAdminSerializer, _generar_password_temporal
 
 from .models import User, TokenVerificacion
+
+logger = logging.getLogger(__name__)
 from .services import crear_token_verificacion
 from .email_service import (
     enviar_pin_verificacion,
@@ -29,6 +33,7 @@ from .serializers import (
     SolicitarRecuperacionSerializer,
     RecuperarPasswordSerializer,
     CambiarPasswordSerializer,
+    CambiarPasswordObligatorioSerializer,
     UserSerializer,
 )
 
@@ -73,6 +78,7 @@ def _clear_auth_cookies(response) -> None:
 
     response.delete_cookie("access_token",  samesite=samesite)
     response.delete_cookie("refresh_token", samesite=samesite)
+
 
 # ------------------------------------------------
 # REGISTRO DE CONSUMIDOR
@@ -129,6 +135,10 @@ class CrearFuncionarioView(APIView):
     Creación de funcionarios ADMIN, ANH y ESS.
     Solo accesible por administradores del sistema.
     Crea User + PerfilFuncionario en un solo paso.
+
+    La contraseña la genera el backend y se devuelve una única vez
+    en la respuesta para que el administrador la comunique. El
+    funcionario debe cambiarla en su primer ingreso.
     """
 
     permission_classes = [IsAuthenticated]
@@ -158,9 +168,14 @@ class CrearFuncionarioView(APIView):
 
         return Response(
             {
-                "detail": "Funcionario creado exitosamente.",
-                "email": user.email,
-                "tipo_usuario": user.tipo_usuario,
+                "detail":            "Funcionario creado exitosamente.",
+                "email":             user.email,
+                "tipo_usuario":      user.tipo_usuario,
+                "password_temporal": user._password_temporal,
+                "aviso": (
+                    "El funcionario deberá cambiar esta contraseña "
+                    "al iniciar sesión por primera vez."
+                ),
             },
             status=status.HTTP_201_CREATED
         )
@@ -190,10 +205,21 @@ class LoginView(APIView):
         )
 
         if not serializer.is_valid():
-            # Registrar intento fallido si el usuario existe
-            email = request.data.get("email", "")
+            # Registrar intento fallido si el usuario existe.
+            # CRÍTICO: sin normalizar+iexact acá, esto es un bypass
+            # completo del bloqueo por fuerza bruta. LoginSerializer
+            # normaliza el email antes de autenticar, así que el login
+            # se resuelve igual contra el usuario correcto — pero como
+            # este lookup usaba el valor crudo con match exacto, un
+            # atacante que varía las mayúsculas del email en cada
+            # intento (Admin@x.com, ADMIN@x.com, aDmIn@x.com...) nunca
+            # encontraba al usuario acá, intentos_fallidos nunca subía,
+            # y la cuenta nunca se bloqueaba, sin importar cuántas
+            # contraseñas se probaran. Encontrado en la auditoría de
+            # 2026-09, no reportado originalmente.
+            email = request.data.get("email", "").lower().strip()
             try:
-                user = User.objects.get(email=email)
+                user = User.objects.get(email__iexact=email)
                 from configuracion.models import ConfiguracionSistema
                 config = ConfiguracionSistema.obtener()
 
@@ -226,12 +252,20 @@ class LoginView(APIView):
         refresh = RefreshToken.for_user(user)
         access  = str(refresh.access_token)
 
+        # authenticate() no aplica select_related: se vuelve a traer con
+        # el perfil precargado para que UserSerializer no dispare una
+        # query extra al resolver perfil_funcionario (mismo caso que
+        # MiPerfilView).
+        user_completo = User.objects.select_related(
+            "perfil_funcionario__estacion_servicio"
+        ).get(pk=user.pk)
+
         # IMPORTANTE: enviar access en el body para que el frontend
         # lo use como Authorization Bearer si las cookies fallan
         response = Response(
             {
                 "detail": "Login exitoso.",
-                "user": UserSerializer(user).data,
+                "user": UserSerializer(user_completo).data,
                 "access": access,
             },
             status=status.HTTP_200_OK
@@ -376,7 +410,7 @@ class SolicitarRecuperacionView(APIView):
         email = serializer.validated_data["email"]
 
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email__iexact=email)
 
             # Generar token de recuperación
             # (invalida anteriores internamente)
@@ -444,8 +478,9 @@ class RecuperarPasswordView(APIView):
 class CambiarPasswordView(APIView):
     """
     Permite al usuario autenticado cambiar su contraseña
-    conociendo la actual. También usado cuando
-    requiere_cambio_password=True.
+    conociendo la actual. Para el caso requiere_cambio_password=True
+    (contraseña generada por un admin) usar CambiarPasswordObligatorioView,
+    que no exige la contraseña actual.
     """
 
     permission_classes = [IsAuthenticated]
@@ -477,6 +512,45 @@ class CambiarPasswordView(APIView):
         return response
 
 
+class CambiarPasswordObligatorioView(APIView):
+    """
+    Cambio de contraseña forzado cuando requiere_cambio_password=True
+    (contraseña generada por un admin: alta de funcionario, registro
+    de consumidor por admin, o reset de contraseña). No exige la
+    contraseña actual porque el usuario acaba de autenticarse con
+    ella — pedírsela de nuevo es fricción sin valor de seguridad.
+
+    A diferencia de CambiarPasswordView, esta vista NO limpia las
+    cookies de sesión: SIMPLE_JWT no tiene CHECK_REVOKE_TOKEN activo,
+    así que la validez del access/refresh token no depende del hash
+    de la contraseña, y forzar un nuevo login inmediatamente después
+    de que el usuario acaba de iniciar sesión sería mala experiencia
+    sin beneficio real.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+
+        if not request.user.requiere_cambio_password:
+            return Response(
+                {"detail": "Esta cuenta no requiere cambio de contraseña obligatorio."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = CambiarPasswordObligatorioSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        user.set_password(serializer.validated_data["password_nuevo"])
+        user.requiere_cambio_password = False
+        user.save(update_fields=["password", "requiere_cambio_password"])
+
+        return Response(
+            {"detail": "Contraseña actualizada correctamente."},
+            status=status.HTTP_200_OK
+        )
+
 
 # ------------------------------------------------
 # REENVIAR PIN DE VERIFICACIÓN
@@ -501,7 +575,7 @@ class ReenviarPinView(APIView):
             )
 
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email__iexact=email)
         except User.DoesNotExist:
             return Response(
                 {"detail": "Si el correo está registrado y no verificado, recibirás un nuevo PIN."},
@@ -532,6 +606,7 @@ class ReenviarPinView(APIView):
             status=status.HTTP_200_OK
         )
 
+
 # ------------------------------------------------
 # PERFIL DEL USUARIO AUTENTICADO
 # ------------------------------------------------
@@ -544,12 +619,21 @@ class MiPerfilView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # select_related evita una query extra para perfil_funcionario
+        # (UserSerializer la resuelve con hasattr/acceso lazy) en un
+        # endpoint que el frontend llama en casi cada carga de página.
+        user = User.objects.select_related(
+            "perfil_funcionario__estacion_servicio"
+        ).get(pk=request.user.pk)
         return Response(
-            UserSerializer(request.user).data,
+            UserSerializer(user).data,
             status=status.HTTP_200_OK
         )
 
-#-------------------------------------------------
+
+# ------------------------------------------------
+# GESTIÓN DE FUNCIONARIOS
+# ------------------------------------------------
 
 class FuncionarioListView(APIView):
     """
@@ -558,38 +642,38 @@ class FuncionarioListView(APIView):
     ANH puede ver solo ESS.
     """
     permission_classes = [IsAuthenticated]
- 
+
     def get(self, request):
         user = request.user
- 
+
         if user.tipo_usuario not in ["ADMIN", "ANH"]:
             return Response(
                 {"detail": "No tienes permiso para ver funcionarios."},
                 status=status.HTTP_403_FORBIDDEN
             )
- 
+
         # Filtrar por tipo si se especifica
         tipo = request.query_params.get("tipo_usuario", None)
         search = request.query_params.get("search", "")
- 
+
         qs = User.objects.exclude(
             tipo_usuario=User.TipoUsuario.CONS
         ).select_related("perfil_funcionario__estacion_servicio")
- 
+
         # ANH solo puede ver ESS
         if user.tipo_usuario == "ANH":
             qs = qs.filter(tipo_usuario=User.TipoUsuario.ESS)
- 
+
         if tipo:
             qs = qs.filter(tipo_usuario=tipo)
- 
+
         if search:
             qs = qs.filter(
                 models.Q(nombres__icontains=search) |
                 models.Q(apellido_paterno__icontains=search) |
                 models.Q(email__icontains=search)
             )
- 
+
         data = []
         for u in qs:
             perfil = getattr(u, "perfil_funcionario", None)
@@ -616,16 +700,18 @@ class FuncionarioListView(APIView):
                     "estacion_nombre":      perfil.estacion_servicio.nombre if perfil and perfil.estacion_servicio else None,
                 } if perfil else None,
             })
- 
+
         return Response(data, status=status.HTTP_200_OK)
- 
- 
+
+
 class FuncionarioDetailView(APIView):
     """
-    Detalle, edición y cambio de estado de un funcionario.
+    Detalle y edición de un funcionario.
+    Acepta PUT y PATCH: el update es parcial en ambos casos, ya que
+    cada campo usa data.get() con fallback al valor actual.
     """
     permission_classes = [IsAuthenticated]
- 
+
     def _get_usuario(self, user_id, request_user):
         try:
             u = User.objects.select_related(
@@ -633,22 +719,22 @@ class FuncionarioDetailView(APIView):
             ).get(id=user_id)
         except User.DoesNotExist:
             return None
- 
+
         # ANH solo puede ver ESS
         if request_user.tipo_usuario == "ANH" and u.tipo_usuario != "ESS":
             return None
- 
+
         # ANH no puede ver otros ANH ni ADMIN
         if request_user.tipo_usuario not in ["ADMIN", "ANH"]:
             return None
- 
+
         return u
- 
+
     def get(self, request, user_id):
         u = self._get_usuario(user_id, request.user)
         if not u:
             return Response({"detail": "No encontrado."}, status=status.HTTP_404_NOT_FOUND)
- 
+
         perfil = getattr(u, "perfil_funcionario", None)
         return Response({
             "id":               u.id,
@@ -672,27 +758,33 @@ class FuncionarioDetailView(APIView):
                 "estacion_nombre":      perfil.estacion_servicio.nombre if perfil and perfil.estacion_servicio else None,
             } if perfil else None,
         })
- 
+
     def put(self, request, user_id):
         u = self._get_usuario(user_id, request.user)
         if not u:
             return Response({"detail": "No encontrado."}, status=status.HTTP_404_NOT_FOUND)
- 
+
         data = request.data
- 
+
         # Actualizar datos básicos del usuario
         u.nombres          = data.get("nombres", u.nombres)
         u.apellido_paterno = data.get("apellido_paterno", u.apellido_paterno)
         u.apellido_materno = data.get("apellido_materno", u.apellido_materno)
         u.save(update_fields=["nombres", "apellido_paterno", "apellido_materno"])
- 
+
         # Actualizar perfil funcionario
         perfil = getattr(u, "perfil_funcionario", None)
         if perfil:
             perfil.cargo               = data.get("cargo", perfil.cargo)
             perfil.unidad_departamento = data.get("unidad_departamento", perfil.unidad_departamento)
             perfil.celular             = data.get("celular", perfil.celular)
- 
+
+            # Estos tres se mostraban en el formulario de edición pero
+            # se ignoraban al guardar: el usuario creía haberlos cambiado.
+            perfil.numero_funcionario  = data.get("numero_funcionario", perfil.numero_funcionario)
+            perfil.tipo_documento      = data.get("tipo_documento", perfil.tipo_documento)
+            perfil.numero_documento    = data.get("numero_documento", perfil.numero_documento)
+
             # Actualizar estacion solo para ESS
             if u.tipo_usuario == "ESS" and "estacion_servicio_id" in data:
                 from estaciones.models import EstacionServicio
@@ -704,31 +796,44 @@ class FuncionarioDetailView(APIView):
                         {"detail": "Estación no encontrada."},
                         status=status.HTTP_400_BAD_REQUEST
                     )
- 
-            perfil.save()
- 
+
+            # numero_documento y numero_funcionario son unique en el modelo:
+            # sin este manejo un duplicado devolvería un 500.
+            try:
+                perfil.save()
+            except IntegrityError:
+                return Response(
+                    {"detail": "El número de documento o de funcionario ya está en uso."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
         return Response({"detail": "Funcionario actualizado correctamente."})
- 
- 
+
+    def patch(self, request, user_id):
+        # El update ya es parcial por diseño (data.get con fallback),
+        # así que PATCH y PUT comparten implementación.
+        return self.put(request, user_id)
+
+
 class FuncionarioCambiarEstadoView(APIView):
     """
     Activa o suspende un funcionario.
     Solo ADMIN puede cambiar estado de cualquier funcionario.
     """
     permission_classes = [IsAuthenticated]
- 
+
     def post(self, request, user_id):
         if request.user.tipo_usuario != "ADMIN":
             return Response(
                 {"detail": "Solo el administrador puede cambiar el estado de un funcionario."},
                 status=status.HTTP_403_FORBIDDEN
             )
- 
+
         try:
             u = User.objects.get(id=user_id)
         except User.DoesNotExist:
             return Response({"detail": "No encontrado."}, status=status.HTTP_404_NOT_FOUND)
- 
+
         nuevo_estado = request.data.get("estado_cuenta")
         if nuevo_estado not in [
             User.EstadoCuenta.ACTIVO,
@@ -738,22 +843,100 @@ class FuncionarioCambiarEstadoView(APIView):
                 {"detail": "Estado inválido. Use ACTIVO o SUSPENDIDO."},
                 status=status.HTTP_400_BAD_REQUEST
             )
- 
+
         u.estado_cuenta = nuevo_estado
         u.save(update_fields=["estado_cuenta"])
- 
+
         return Response({
             "detail": f"Estado cambiado a {nuevo_estado}.",
             "estado_cuenta": nuevo_estado,
         })
 
+
+class FuncionarioResetearPasswordView(APIView):
+    """
+    Resetea la contraseña de un funcionario (ADMIN/ANH/ESS) cuando
+    la olvidó y el flujo público de recuperación por email no es una
+    opción (Brevo aún no está configurado en producción).
+
+    Solo ADMIN puede usarlo, y no puede resetear su propia contraseña
+    por esta vía (para eso está el cambio normal con contraseña actual,
+    en CambiarPasswordView). Genera una contraseña temporal, fuerza
+    requiere_cambio_password y cierra las sesiones activas del usuario.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, user_id):
+        if request.user.tipo_usuario != "ADMIN":
+            return Response(
+                {"detail": "Solo el administrador puede resetear contraseñas."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if request.user.id == user_id:
+            return Response(
+                {
+                    "detail": (
+                        "No puedes resetear tu propia contraseña por esta vía. "
+                        "Usa el cambio de contraseña habitual."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            usuario = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({"detail": "No encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        password_temporal = _generar_password_temporal()
+        usuario.set_password(password_temporal)
+        usuario.requiere_cambio_password = True
+        usuario.save(update_fields=["password", "requiere_cambio_password"])
+
+        # Cierra las sesiones activas del usuario blacklisteando todos sus
+        # refresh tokens outstanding (mismo mecanismo que usa LogoutView
+        # para el token de la request actual, aplicado acá a todos los
+        # suyos). LIMITACIÓN CONOCIDA Y ACEPTADA: esto no revoca el access
+        # token que el usuario ya tenga en memoria — al no consultarse la
+        # blacklist en cada request autenticada, seguirá siendo válido
+        # hasta su propia expiración (máx. 30 min, ACCESS_TOKEN_LIFETIME).
+        # Es la misma ventana que ya existe hoy con el logout normal.
+        for token in OutstandingToken.objects.filter(user=usuario):
+            BlacklistedToken.objects.get_or_create(token=token)
+
+        # Acción sensible sobre la cuenta de otro usuario: sin un sistema
+        # de auditoría todavía, al menos queda registrada en los logs.
+        logger.warning(
+            "Reset de contraseña: admin %s (id=%s) reseteó a %s (id=%s)",
+            request.user.email, request.user.id, usuario.email, usuario.id,
+        )
+
+        return Response(
+            {
+                "detail":            "Contraseña reseteada correctamente.",
+                "email":             usuario.email,
+                "password_temporal": password_temporal,
+                "aviso": (
+                    "Comparte esta contraseña con el usuario. Deberá "
+                    "cambiarla al iniciar sesión."
+                ),
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+# ------------------------------------------------
+# REGISTRO DE CONSUMIDOR POR ADMIN
+# ------------------------------------------------
+
 class RegistroConsumidorPorAdminView(APIView):
     """
     POST /api/users/registro/consumidor-por-admin/
- 
+
     Registra a un consumidor iniciado por un funcionario ANH o ADMIN
     (típicamente en atención presencial).
- 
+
     A diferencia del auto-registro público:
       - El admin no elige contraseña — la genera el backend
       - No se envía PIN de verificación (el admin verifica al consumidor
@@ -761,50 +944,36 @@ class RegistroConsumidorPorAdminView(APIView):
       - El email queda marcado como verificado
       - Se devuelve la contraseña temporal para que el admin la comparta
         con el consumidor
- 
+
     Solo usuarios ANH o ADMIN autenticados pueden llamar este endpoint.
- 
-    Retorna 201 con:
-        {
-            "message":           "Consumidor registrado correctamente",
-            "user_id":           <id>,
-            "email":             "consumidor@example.com",
-            "password_temporal": "aB3xY9Kq2Nm7",
-            "aviso":             "El consumidor deberá cambiar esta contraseña
-                                  al iniciar sesión por primera vez."
-        }
     """
- 
+
     permission_classes = [IsAuthenticated]
     parser_classes     = [MultiPartParser, FormParser]
- 
+
     def post(self, request):
- 
+
         # Solo ANH y ADMIN pueden registrar consumidores por esta vía.
-        # (No usamos un permission class dedicado para mantener la view
-        # autocontenida; si tienes IsAdminOrANH en users.permissions,
-        # cámbialo por eso — más limpio.)
         if request.user.tipo_usuario not in ("ANH", "ADMIN"):
             return Response(
                 {"detail": "Solo ANH o ADMIN pueden registrar consumidores."},
                 status=status.HTTP_403_FORBIDDEN,
             )
- 
+
         serializer = RegistroConsumidorPorAdminSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
- 
+
         return Response(
             {
                 "message":           "Consumidor registrado correctamente",
                 "user_id":           user.id,
                 "email":             user.email,
                 "password_temporal": user._password_temporal,
-                "aviso":             (
+                "aviso": (
                     "El consumidor deberá cambiar esta contraseña al iniciar "
                     "sesión por primera vez."
                 ),
             },
             status=status.HTTP_201_CREATED,
         )
- 

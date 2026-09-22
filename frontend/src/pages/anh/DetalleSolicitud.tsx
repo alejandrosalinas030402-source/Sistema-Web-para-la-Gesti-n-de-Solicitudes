@@ -367,6 +367,14 @@ export default function DetalleSolicitudANH() {
               {solicitud.litros_despachados && (
                 <Dato label="Litros despachados" value={`${solicitud.litros_despachados} L`} />
               )}
+              {solicitud.observacion_despacho && (
+                <div className="col-span-2">
+                  <p className="text-xs text-muted-foreground mb-1">Observación de despacho</p>
+                  <p className="text-sm text-foreground bg-background border border-border rounded-xl px-4 py-2">
+                    {solicitud.observacion_despacho}
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         )}

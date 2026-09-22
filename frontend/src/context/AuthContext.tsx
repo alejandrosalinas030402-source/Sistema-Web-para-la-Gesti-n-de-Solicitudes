@@ -14,6 +14,24 @@ import axios from "axios";
 // TIPOS
 // ------------------------------------------------
 
+// Datos institucionales del usuario autenticado (ADMIN/ANH/ESS),
+// tal como los devuelve PerfilFuncionarioSerializer anidado en
+// UserSerializer. Es null para CONS. No confundir con
+// `PerfilFuncionario` de services/users.service.ts, que trae otra
+// forma (estacion_servicio_id/estacion_nombre) pensada para la
+// gestión de usuarios por un admin, no para el propio "/me/".
+export interface PerfilFuncionarioMe {
+  tipo_documento:        "CI" | "PASAPORTE" | "EXTRANJERO";
+  numero_documento:      string;
+  complemento_documento: string;
+  numero_funcionario:    string;
+  cargo:                 string;
+  unidad_departamento:   string;
+  celular:               string;
+  estacion_servicio:     number | null;
+  fecha_creacion:        string;
+}
+
 export interface User {
   id: number;
   email: string;
@@ -24,10 +42,12 @@ export interface User {
   tipo_usuario: "ADMIN" | "ANH" | "ESS" | "CONS";
   estado_cuenta: string;
   email_verificado: boolean;
+  requiere_cambio_password: boolean;
   date_joined: string;
   access?: string;
   municipio_id: number | null;
   estacion_nombre: string | null;
+  perfil_funcionario: PerfilFuncionarioMe | null;
 }
 
 interface AuthContextType {

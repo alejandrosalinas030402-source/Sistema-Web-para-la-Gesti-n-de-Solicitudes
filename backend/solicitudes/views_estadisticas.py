@@ -27,6 +27,11 @@ class EstadisticasSolicitudesView(APIView):
     permission_classes = [IsAuthenticated, IsAdminOrANH]
 
     def get(self, request):
+        # Corrige solicitudes vencidas antes de calcular las cifras
+        # (ver solicitudes/services/expirar_solicitudes.py).
+        from .services.expirar_solicitudes import expirar_solicitudes_vencidas_seguro
+        expirar_solicitudes_vencidas_seguro()
+
         # ------------------------------------------------
         # FILTROS
         # ------------------------------------------------
@@ -189,6 +194,11 @@ class ReporteSolicitudesView(APIView):
     permission_classes = [IsAuthenticated, IsAdminOrANH]
 
     def get(self, request):
+        # Corrige solicitudes vencidas antes de generar el reporte
+        # (ver solicitudes/services/expirar_solicitudes.py).
+        from .services.expirar_solicitudes import expirar_solicitudes_vencidas_seguro
+        expirar_solicitudes_vencidas_seguro()
+
         from django.http import HttpResponse
 
         formato     = request.query_params.get("formato", "EXCEL").upper()

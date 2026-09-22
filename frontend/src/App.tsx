@@ -17,6 +17,11 @@ const MiSolicitud         = lazy(() => import("./pages/consumidor/MiSolicitud"))
 const MiPerfil            = lazy(() => import("./pages/consumidor/MiPerfil"));
 const RecuperarPassword   = lazy(() => import("./pages/RecuperarPassword"));
 const ConfirmarRecuperacion = lazy(() => import("./pages/ConfirmarRecuperacion"));
+const CambiarPasswordObligatorio = lazy(() => import("./pages/CambiarPasswordObligatorio"));
+
+// Perfil compartido por ANH, ADMIN y ESS (ver el propio archivo
+// para el porqué de un solo componente en vez de uno por rol).
+const MiPerfilFuncionario = lazy(() => import("./pages/MiPerfilFuncionario"));
 
 // Páginas ANH/ADMIN
 const DashboardANH        = lazy(() => import("./pages/anh/Dashboard"));
@@ -32,6 +37,7 @@ const EstacionesDepartamento = lazy(() => import("./pages/anh/EstacionesDepartam
 const EstacionesProvincia    = lazy(() => import("./pages/anh/EstacionesProvincia"));
 // Páginas ESS
 const SolicitudesESS      = lazy(() => import("./pages/estacion/Solicitudes"));
+const HistorialESS        = lazy(() => import("./pages/estacion/Historial"));
 
 // Loading fallback
 const PageLoader = () => (
@@ -81,6 +87,19 @@ function AppRoutes() {
 
         {/* ---- REDIRECCIÓN POR ROL ---- */}
         <Route path="/" element={<RoleRedirect />} />
+
+        {/* ---- CAMBIO DE CONTRASEÑA OBLIGATORIO ----
+             Sin allowedRoles: aplica a los cuatro roles por igual.
+             Registrada antes de las rutas de rol — ProtectedRoute
+             redirige acá desde cualquiera de ellas cuando
+             user.requiere_cambio_password es true. */}
+        <Route path="/cambiar-password-obligatorio"
+          element={
+            <ProtectedRoute>
+              <CambiarPasswordObligatorio />
+            </ProtectedRoute>
+          }
+        />
 
         {/* ---- CONSUMIDOR ---- */}
         <Route path="/consumidor/solicitud"
@@ -148,12 +167,33 @@ function AppRoutes() {
             </ProtectedRoute>
           }
         />
+        <Route path="/anh/perfil"
+          element={
+            <ProtectedRoute allowedRoles={["ANH", "ADMIN"]}>
+              <MiPerfilFuncionario />
+            </ProtectedRoute>
+          }
+        />
 
         {/* ---- ESS ---- */}
         <Route path="/estacion/solicitudes"
           element={
             <ProtectedRoute allowedRoles={["ESS"]}>
               <SolicitudesESS />
+            </ProtectedRoute>
+          }
+        />
+        <Route path="/estacion/historial"
+          element={
+            <ProtectedRoute allowedRoles={["ESS"]}>
+              <HistorialESS />
+            </ProtectedRoute>
+          }
+        />
+        <Route path="/estacion/perfil"
+          element={
+            <ProtectedRoute allowedRoles={["ESS"]}>
+              <MiPerfilFuncionario />
             </ProtectedRoute>
           }
         />

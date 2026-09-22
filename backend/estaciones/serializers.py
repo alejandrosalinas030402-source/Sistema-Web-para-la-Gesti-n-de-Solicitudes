@@ -96,8 +96,8 @@ class EstacionServicioReadSerializer(serializers.ModelSerializer):
 
 class EstacionServicioListSerializer(serializers.ModelSerializer):
     """
-    Serializer liviano para listados.
-    Sin operadores ni conteos para mejor rendimiento.
+    Serializer liviano para listados: sin el detalle de operadores
+    (nombre, email, celular), solo el conteo.
     """
 
     municipio_nombre    = serializers.CharField(
@@ -112,6 +112,7 @@ class EstacionServicioListSerializer(serializers.ModelSerializer):
     departamento_id = serializers.IntegerField(
         source="municipio.provincia.departamento.id", read_only=True
     )
+    operadores_count = serializers.SerializerMethodField()
 
     class Meta:
         model = EstacionServicio
@@ -119,13 +120,22 @@ class EstacionServicioListSerializer(serializers.ModelSerializer):
             "id",
             "nombre",
             "codigo",
-            "provincia_id", 
+            "provincia_id",
             "departamento_id",
             "municipio",
             "municipio_nombre",
             "departamento_nombre",
             "estado",
+            "operadores_count",
         ]
+
+    def get_operadores_count(self, obj):
+        # len() en vez de .count(): el queryset base de la vista ya
+        # hace prefetch_related("funcionarios__user") para toda acción
+        # (list incluida), así que obj.funcionarios.all() ya está en
+        # caché — .count() ignoraría esa caché y dispararía una query
+        # nueva por cada estación de la lista.
+        return len(obj.funcionarios.all())
 
 
 # ------------------------------------------------

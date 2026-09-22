@@ -33,6 +33,7 @@ export interface Solicitud {
   litros_aprobados:              number | null;
   litros_despachados:            number | null;
   observacion_anh:               string;
+  observacion_despacho:          string;
   estacion_servicio:             number | null;
   estacion_nombre:               string;
   fecha_creacion:                string;
@@ -57,6 +58,7 @@ export interface Solicitud {
   departamento_nombre?:          string;
   provincia_nombre?:             string;
   municipio_nombre?:             string;
+  consumidor_documento?:         string | null;
 }
 
 export interface ConsumidorResumen {
