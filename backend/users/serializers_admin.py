@@ -83,7 +83,7 @@ class RegistroConsumidorPorAdminSerializer(serializers.Serializer):
 
     def validate_email(self, value):
         value = value.lower().strip()
-        if User.objects.filter(email=value).exists():
+        if User.objects.filter(email__iexact=value).exists():
             raise serializers.ValidationError(
                 "Ya existe una cuenta registrada con este correo."
             )

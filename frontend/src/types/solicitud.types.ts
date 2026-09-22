@@ -33,6 +33,7 @@ export interface Solicitud {
   litros_aprobados:              number | null;
   litros_despachados:            number | null;
   observacion_anh:               string;
+  observacion_despacho:          string;
   estacion_servicio:             number | null;
   estacion_nombre:               string;
   fecha_creacion:                string;

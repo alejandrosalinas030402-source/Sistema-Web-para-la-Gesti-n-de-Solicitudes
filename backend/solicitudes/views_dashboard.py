@@ -23,6 +23,11 @@ class DashboardANHView(APIView):
 
     def get(self, request):
 
+        # Corrige solicitudes vencidas antes de calcular las cifras
+        # (ver solicitudes/services/expirar_solicitudes.py).
+        from .services.expirar_solicitudes import expirar_solicitudes_vencidas_seguro
+        expirar_solicitudes_vencidas_seguro()
+
         ahora         = timezone.now()
         inicio_mes    = ahora.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         inicio_semana = ahora - timedelta(days=7)

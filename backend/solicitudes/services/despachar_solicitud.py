@@ -62,16 +62,33 @@ def despachar_solicitud(
 
         now = timezone.now()
 
-        solicitud.estado             = Solicitud.EstadoSolicitud.DESPACHADA
-        solicitud.litros_despachados = litros_despachados  # Real entregado
-        solicitud.observacion_anh    = observacion
-        solicitud.despachado_por     = usuario
-        solicitud.fecha_despacho     = now
+        estado_anterior = solicitud.estado
+
+        solicitud.estado                = Solicitud.EstadoSolicitud.DESPACHADA
+        solicitud.litros_despachados    = litros_despachados  # Real entregado
+        solicitud.observacion_despacho  = observacion
+        solicitud.despachado_por        = usuario
+        solicitud.fecha_despacho        = now
 
         # litros_aprobados se preserva intacto para trazabilidad
+        # observacion_anh NO se toca acá: es de la ANH (aprobar/observar/
+        # rechazar), observacion_despacho es la nota propia del despacho.
+        # Antes de 2026-09 esta línea pisaba observacion_anh por error.
 
         solicitud.full_clean()
         solicitud.save()
+
+        # El despacho es la última transición del ciclo de vida y hasta
+        # 2026-09 no quedaba en la auditoría, a diferencia de
+        # aprobar/observar/rechazar/cancelar.
+        from .registrar_auditoria import registrar_cambio_estado
+        registrar_cambio_estado(
+            solicitud       = solicitud,
+            estado_anterior = estado_anterior,
+            estado_nuevo    = Solicitud.EstadoSolicitud.DESPACHADA,
+            usuario         = usuario,
+            nota            = f"Despacho: {observacion}" if observacion else "",
+        )
 
         # Verificar repetitividad tras cada despacho
         try:

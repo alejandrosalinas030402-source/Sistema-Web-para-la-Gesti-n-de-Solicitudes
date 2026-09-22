@@ -43,6 +43,19 @@ export const consumidoresService = {
     const res = await api.post(`/api/consumidores/${id}/alerta/`, data);
     return res.data;
   },
+
+  // {id} acá es el pk de ConsumidorPerfil (mismo que el resto de
+  // este servicio), no el id de User — ver comentario en
+  // consumidores/views.py:resetear_password.
+  resetearPassword: async (id: number): Promise<{
+    detail: string;
+    email: string;
+    password_temporal: string;
+    aviso: string;
+  }> => {
+    const res = await api.post(`/api/consumidores/${id}/resetear-password/`);
+    return res.data;
+  },
 };
 
 

@@ -7,7 +7,9 @@ import { api } from "../context/AuthContext";
 // ------------------------------------------------
 
 export type TipoUsuario  = "ANH" | "ESS" | "ADMIN" | "CONSUMIDOR";
-export type EstadoCuenta = "ACTIVO" | "BLOQUEADO" | "INACTIVO" | "PENDIENTE_VERIFICACION";
+
+// Coincide con User.EstadoCuenta del backend (users/models.py).
+export type EstadoCuenta = "PENDIENTE" | "ACTIVO" | "SUSPENDIDO";
 
 // Coincide con PerfilFuncionario.TipoDocumento del backend.
 // Ojo: los funcionarios NO usan "CIE" (eso es de DocumentoIdentidad,
@@ -72,6 +74,15 @@ export interface CrearFuncionarioResponse {
   aviso:             string;
 }
 
+// Misma forma que CrearFuncionarioResponse, sin tipo_usuario
+// (el reset no crea una cuenta nueva, no aplica).
+export interface ResetearPasswordResponse {
+  detail:            string;
+  email:             string;
+  password_temporal: string;
+  aviso:             string;
+}
+
 // Payload para editar
 export interface EditarFuncionarioPayload {
   nombres?:          string;
@@ -120,6 +131,11 @@ export const usersService = {
     const res = await api.post(`/api/users/funcionarios/${id}/cambiar-estado/`, {
       estado_cuenta: estado,
     });
+    return res.data;
+  },
+
+  resetearPassword: async (id: number): Promise<ResetearPasswordResponse> => {
+    const res = await api.post(`/api/users/funcionarios/${id}/resetear-password/`);
     return res.data;
   },
 };

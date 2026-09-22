@@ -282,5 +282,25 @@ BREVO_SENDER_NAME  = env("BREVO_SENDER_NAME",  default="ANH Bolivia")
 FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:5173")
 
 # ------------------------------------------------
-# TAREAS PERIÓDICAS (django-crontab)
+# LOGGING
+# Handler de consola a nivel INFO acotado a las apps propias
+# (no django.* completo, que llenaría los logs con cada request).
+# Sin esto, logger.info() no llega a ningún lado: Python solo usa
+# su "last resort handler" (WARNING+) cuando no hay logging
+# configurado, así que los .info() de la app quedaban invisibles.
+# En Railway, la consola es el propio stream de logs del servicio.
 # ------------------------------------------------
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "loggers": {
+        app: {"handlers": ["console"], "level": "INFO", "propagate": False}
+        for app in ["solicitudes", "users", "consumidores", "estaciones"]
+    },
+}

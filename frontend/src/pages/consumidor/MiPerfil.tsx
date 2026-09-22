@@ -4,18 +4,15 @@ import { useState, useEffect } from "react";
 import Layout from "../../components/Layout";
 import { consumidoresService } from "../../services/consumidores.service";
 import { catalogosService } from "../../services/catalogos.service";
-import { authService } from "../../services/auth.service";
 import type { ConsumidorPerfil, Departamento, Provincia, Municipio } from "../../types/consumidor.types";
 import { EstadoIdentidadBadge, AlertaBadge } from "../../components/ui/EstadoBadge";
-import { Modal } from "../../components/ui/Modal";
+import { CambiarPasswordModal } from "../../components/ui/CambiarPasswordModal";
 import { Button } from "../../components/ui/Button";
-import { Alert } from "../../components/ui/Alert";
 import { ACTIVIDADES } from "../../utils/constants";
-import { passwordSeguroSchema, PASSWORD_HELP_TEXT } from "../../utils/passwordSchema";
 import { formatFecha } from "../../utils/format";
 import {
   User, MapPin, Briefcase, Shield, FileImage, Edit2, Check, X,
-  AlertCircle, CheckCircle, KeyRound, Eye, EyeOff,
+  AlertCircle, CheckCircle, KeyRound,
 } from "lucide-react";
 
 export default function MiPerfil() {
@@ -35,90 +32,8 @@ export default function MiPerfil() {
     direccion: "", actividad: "",
   });
 
-  // ------------------------------------------------
-  // CAMBIO DE CONTRASEÑA
-  // ------------------------------------------------
-
+  // Cambio de contraseña — encapsulado en CambiarPasswordModal
   const [modalPassword, setModalPassword] = useState(false);
-  const [cambiandoPass, setCambiandoPass] = useState(false);
-  const [errorPass,     setErrorPass]     = useState("");
-  const [exitoPass,     setExitoPass]     = useState(false);
-  const [verPass,       setVerPass]       = useState(false);
-
-  const [formPass, setFormPass] = useState({
-    password_actual: "",
-    password_nuevo:  "",
-    password_nuevo2: "",
-  });
-
-  const abrirModalPassword = () => {
-    setFormPass({ password_actual: "", password_nuevo: "", password_nuevo2: "" });
-    setErrorPass("");
-    setExitoPass(false);
-    setVerPass(false);
-    setModalPassword(true);
-  };
-
-  const cambiarPassword = async () => {
-    setErrorPass("");
-
-    if (!formPass.password_actual || !formPass.password_nuevo || !formPass.password_nuevo2) {
-      setErrorPass("Completa los tres campos.");
-      return;
-    }
-
-    // Validación local antes de llamar al backend
-    const check = passwordSeguroSchema.safeParse(formPass.password_nuevo);
-    if (!check.success) {
-      setErrorPass(check.error.issues[0]?.message ?? "La contraseña no cumple los requisitos.");
-      return;
-    }
-
-    if (formPass.password_nuevo !== formPass.password_nuevo2) {
-      setErrorPass("Las contraseñas nuevas no coinciden.");
-      return;
-    }
-
-    if (formPass.password_actual === formPass.password_nuevo) {
-      setErrorPass("La contraseña nueva no puede ser igual a la actual.");
-      return;
-    }
-
-    setCambiandoPass(true);
-    try {
-      await authService.cambiarPassword(
-        formPass.password_actual,
-        formPass.password_nuevo,
-        formPass.password_nuevo2,
-      );
-      // El backend invalida la sesión al cambiar la contraseña,
-      // así que se muestra el aviso y se fuerza un nuevo login.
-      setExitoPass(true);
-    } catch (err: unknown) {
-      const e = err as { response?: { data?: unknown } };
-      const d = e.response?.data;
-      let msg = "Error al cambiar la contraseña.";
-      if (typeof d === "string") {
-        msg = d;
-      } else if (d && typeof d === "object") {
-        const entries = Object.entries(d as Record<string, unknown>);
-        if (entries.length > 0) {
-          msg = entries
-            .map(([, v]) => (Array.isArray(v) ? v[0] : String(v)))
-            .join(" | ");
-        }
-      }
-      setErrorPass(msg);
-    } finally {
-      setCambiandoPass(false);
-    }
-  };
-
-  // Recarga completa: limpia el estado en memoria del AuthContext
-  // y lleva al login (las cookies ya fueron borradas por el backend).
-  const volverAlLogin = () => {
-    window.location.href = "/login";
-  };
 
   // ------------------------------------------------
   // CARGA INICIAL
@@ -359,7 +274,7 @@ export default function MiPerfil() {
             <Button
               variant="outline"
               icon={<KeyRound className="w-4 h-4" />}
-              onClick={abrirModalPassword}
+              onClick={() => setModalPassword(true)}
             >
               Cambiar contraseña
             </Button>
@@ -394,103 +309,7 @@ export default function MiPerfil() {
         )}
       </div>
 
-      {/* MODAL — CAMBIAR CONTRASEÑA */}
-      <Modal
-        open={modalPassword}
-        onClose={() => { if (!exitoPass) setModalPassword(false); }}
-        title={exitoPass ? "" : "Cambiar contraseña"}
-        size="sm"
-      >
-        {exitoPass ? (
-          // Tras el cambio el backend cierra la sesión, así que no se
-          // ofrece "cerrar" el modal: la única salida es volver al login.
-          <div className="text-center py-2">
-            <div className="w-14 h-14 rounded-full bg-state-success-bg flex items-center justify-center mx-auto mb-3">
-              <CheckCircle className="w-7 h-7 text-state-success-fg" />
-            </div>
-            <h3 className="font-semibold text-foreground mb-1">Contraseña actualizada</h3>
-            <p className="text-sm text-muted-foreground mb-5">
-              Por seguridad, tu sesión se cerró. Inicia sesión nuevamente con tu contraseña nueva.
-            </p>
-            <Button variant="primary" onClick={volverAlLogin} className="w-full">
-              Ir al inicio de sesión
-            </Button>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {errorPass && <Alert type="error" message={errorPass} />}
-
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1">
-                Contraseña actual *
-              </label>
-              <input
-                type={verPass ? "text" : "password"}
-                value={formPass.password_actual}
-                onChange={e => setFormPass(f => ({ ...f, password_actual: e.target.value }))}
-                className={inputCls}
-                autoComplete="current-password"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1">
-                Contraseña nueva *
-              </label>
-              <div className="relative">
-                <input
-                  type={verPass ? "text" : "password"}
-                  value={formPass.password_nuevo}
-                  onChange={e => setFormPass(f => ({ ...f, password_nuevo: e.target.value }))}
-                  className={inputCls + " pr-10"}
-                  autoComplete="new-password"
-                />
-                <button
-                  type="button"
-                  onClick={() => setVerPass(v => !v)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  title={verPass ? "Ocultar contraseñas" : "Mostrar contraseñas"}
-                >
-                  {verPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-              <p className="text-xs text-muted-foreground mt-1">{PASSWORD_HELP_TEXT}</p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1">
-                Repetir contraseña nueva *
-              </label>
-              <input
-                type={verPass ? "text" : "password"}
-                value={formPass.password_nuevo2}
-                onChange={e => setFormPass(f => ({ ...f, password_nuevo2: e.target.value }))}
-                className={inputCls}
-                autoComplete="new-password"
-              />
-            </div>
-
-            <div className="flex items-start gap-2 text-xs text-muted-foreground">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>Al cambiar la contraseña se cerrará tu sesión y deberás ingresar de nuevo.</span>
-            </div>
-
-            <div className="flex justify-end gap-3 pt-1">
-              <Button variant="outline" onClick={() => setModalPassword(false)}>
-                Cancelar
-              </Button>
-              <Button
-                variant="primary"
-                icon={<KeyRound className="w-4 h-4" />}
-                loading={cambiandoPass}
-                onClick={cambiarPassword}
-              >
-                Cambiar contraseña
-              </Button>
-            </div>
-          </div>
-        )}
-      </Modal>
+      <CambiarPasswordModal open={modalPassword} onClose={() => setModalPassword(false)} />
     </Layout>
   );
 }

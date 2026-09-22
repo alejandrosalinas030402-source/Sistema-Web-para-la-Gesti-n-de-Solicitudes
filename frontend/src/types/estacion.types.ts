@@ -13,4 +13,8 @@ export interface EstacionServicio {
   departamento_id: number;      // nuevo
   departamento_nombre: string;  // nuevo (antes "departamento": string)
   estado:    EstadoEstacion;
+  // Solo en el listado (EstacionServicioListSerializer). El detalle
+  // (EstacionServicioReadSerializer) trae el array `operadores`
+  // completo en su lugar, no este conteo.
+  operadores_count?: number;
 }

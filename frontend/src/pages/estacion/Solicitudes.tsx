@@ -15,7 +15,7 @@ import { useAuth } from "../../context/AuthContext";
 import type { LucideIcon } from "lucide-react";
 import {
   FileText, RefreshCw, Search, Truck, Droplets,
-  Clock, AlertTriangle, CheckCircle2, ChevronDown, IdCard,
+  Clock, AlertTriangle, CheckCircle2, ChevronDown, IdCard, Building2,
 } from "lucide-react";
 
 // ------------------------------------------------
@@ -113,6 +113,14 @@ export default function SolicitudesESS() {
   // ------------------------------------------------
 
   const cargar = useCallback(async (silencioso = false) => {
+    // Sin estación asignada, el backend siempre devuelve vacío
+    // (get_queryset() aísla al operador) — evitamos el round-trip
+    // inútil cada 60s del auto-refresh.
+    if (!user?.perfil_funcionario?.estacion_servicio) {
+      setLoading(false);
+      setRefrescando(false);
+      return;
+    }
     if (silencioso) setRefrescando(true); else setLoading(true);
     setErrorPagina("");
     try {
@@ -131,7 +139,7 @@ export default function SolicitudesESS() {
       setLoading(false);
       setRefrescando(false);
     }
-  }, []);
+  }, [user?.perfil_funcionario?.estacion_servicio]);
 
   useEffect(() => { cargar(); }, [cargar]);
 
@@ -342,6 +350,22 @@ export default function SolicitudesESS() {
       </div>
     </div>
   );
+
+  if (!user?.perfil_funcionario?.estacion_servicio) {
+    return (
+      <Layout>
+        <div className="max-w-lg mx-auto text-center py-24 px-4">
+          <Building2 className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+          <h1 className="text-xl font-bold text-foreground mb-2">Sin estación asignada</h1>
+          <p className="text-muted-foreground text-sm">
+            Tu cuenta no tiene una estación de servicio asignada, así que no podés
+            ver ni despachar solicitudes. Contacta al administrador para que te
+            asigne una.
+          </p>
+        </div>
+      </Layout>
+    );
+  }
 
   return (
     <Layout>

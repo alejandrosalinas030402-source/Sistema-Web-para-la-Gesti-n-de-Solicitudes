@@ -6,6 +6,7 @@ from django.db import models
 from django.conf import settings
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
 from django.core.exceptions import ValidationError
+from django.db.models.functions import Lower
 from django.utils import timezone
 
 from .managers import UserManager
@@ -149,6 +150,17 @@ class User(AbstractBaseUser, PermissionsMixin):
         verbose_name = "Usuario"
         verbose_name_plural = "Usuarios"
         ordering = ["apellido_paterno", "nombres"]
+        constraints = [
+            # email ya es unique=True (case-sensitive) a nivel de
+            # campo. Este constraint agrega la garantía real que
+            # necesitamos: Juan@x.com y juan@x.com no pueden coexistir.
+            # No basta con normalizar en cada punto de entrada — la
+            # auditoría de 2026-09 encontró cuatro que no lo hacían.
+            models.UniqueConstraint(
+                Lower("email"),
+                name="users_user_email_lower_unique",
+            ),
+        ]
 
 
 # ------------------------------------------------
@@ -256,14 +268,9 @@ class PerfilFuncionario(models.Model):
     # ------------------------------------------------
 
     def clean(self):
-        # Un ESS debe tener estación asignada
-        if (
-            self.user.tipo_usuario == self.user.TipoUsuario.ESS
-            and not self.estacion_servicio
-        ):
-            raise ValidationError(
-                "Un usuario ESS debe tener una estación de servicio asignada."
-            )
+        # ESS puede o no tener estación asignada (un operador recién
+        # creado, o temporalmente sin puesto, queda aislado por
+        # get_queryset()/EsEstacionAsignada en vez de bloquear su alta).
 
         # ADMIN y ANH no deben tener estación asignada
         if (

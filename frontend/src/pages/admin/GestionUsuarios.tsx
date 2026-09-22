@@ -7,6 +7,7 @@ import { Button } from "../../components/ui/Button";
 import { Alert } from "../../components/ui/Alert";
 import { Spinner } from "../../components/ui/Spinner";
 import { Modal } from "../../components/ui/Modal";
+import { MostrarPasswordModal } from "../../components/ui/MostrarPasswordModal";
 import { catalogosService } from "../../services/catalogos.service";
 import { estacionesService } from "../../services/estaciones.service";
 import {
@@ -19,9 +20,12 @@ import {
   type EditarFuncionarioPayload,
 } from "../../services/users.service";
 import { formatFecha } from "../../utils/format";
+import { ESTADOS_CUENTA } from "../../utils/constants";
+import { EstadoCuentaBadge } from "../../components/ui/EstadoBadge";
+import { useAuth } from "../../context/AuthContext";
 import {
-  Users, Plus, Search, RefreshCw, Copy, Eye, EyeOff,
-  CheckCircle, UserCheck, UserX, Info,
+  Users, Plus, Search, RefreshCw,
+  CheckCircle, UserCheck, UserX, KeyRound, AlertTriangle,
 } from "lucide-react";
 
 // ------------------------------------------------
@@ -33,14 +37,6 @@ const TABS_ROL: { value: TipoUsuario | ""; label: string }[] = [
   { value: "ANH",   label: "ANH" },
   { value: "ESS",   label: "Estación" },
   { value: "ADMIN", label: "Administrador" },
-];
-
-const ESTADOS_CUENTA: { value: EstadoCuenta | ""; label: string }[] = [
-  { value: "",                       label: "Todos los estados" },
-  { value: "ACTIVO",                 label: "Activo" },
-  { value: "INACTIVO",               label: "Inactivo" },
-  { value: "BLOQUEADO",              label: "Bloqueado" },
-  { value: "PENDIENTE_VERIFICACION", label: "Pendiente verificación" },
 ];
 
 // Coincide con PerfilFuncionario.TipoDocumento del backend.
@@ -56,13 +52,6 @@ const rolColor: Record<string, string> = {
   ADMIN: "bg-slate-800 text-white",
 };
 
-const estadoColor: Record<string, string> = {
-  ACTIVO:                 "bg-state-success-bg text-state-success-fg",
-  INACTIVO:               "bg-background text-muted-foreground",
-  BLOQUEADO:              "bg-red-100 text-red-600",
-  PENDIENTE_VERIFICACION: "bg-amber-100 text-amber-700",
-};
-
 const ALERT_TIMEOUT = 4000;
 
 // ------------------------------------------------
@@ -70,6 +59,8 @@ const ALERT_TIMEOUT = 4000;
 // ------------------------------------------------
 
 export default function GestionUsuarios() {
+  const { user: adminActual } = useAuth();
+
   const [usuarios, setUsuarios] = useState<UserFuncionario[]>([]);
   const [loading,  setLoading]  = useState(true);
 
@@ -110,12 +101,16 @@ export default function GestionUsuarios() {
   const [estaciones, setEstaciones] = useState<{ id: number; nombre: string }[]>([]);
   const [loadCatalogo, setLoadCatalogo] = useState(false);
 
-  // Modal de contraseña provisional (al crear)
-  const [modalPassword, setModalPassword] = useState<{ email: string; password: string } | null>(null);
-  const [passVisible,   setPassVisible]   = useState(false);
+  // Modal de contraseña provisional (al crear o al resetear)
+  const [modalPassword, setModalPassword] = useState<{ titulo: string; email: string; password: string } | null>(null);
 
   // Cambio de estado
   const [cambiandoEstado, setCambiandoEstado] = useState<number | null>(null);
+
+  // Reset de contraseña
+  const [confirmarReset, setConfirmarReset] = useState<UserFuncionario | null>(null);
+  const [reseteando,     setReseteando]     = useState(false);
+  const [errorReset,     setErrorReset]     = useState("");
 
   useEffect(() => {
     catalogosService.getDepartamentos().then(setDeptos).catch(() => {});
@@ -261,11 +256,6 @@ export default function GestionUsuarios() {
       return;
     }
 
-    if (form.tipo_usuario === "ESS" && !form.estacion_servicio_id && !editando) {
-      setErrorForm("Los usuarios ESS deben tener una estación asignada.");
-      return;
-    }
-
     setGuardando(true); setErrorForm("");
     try {
       if (editando) {
@@ -302,14 +292,16 @@ export default function GestionUsuarios() {
           numero_documento:    form.numero_documento,
           celular:             form.celular,
         };
-        if (form.tipo_usuario === "ESS") {
+        // 0 significa "sin seleccionar": omitir el campo en vez de
+        // mandar un pk inexistente (el backend lo rechazaría con 400).
+        if (form.tipo_usuario === "ESS" && form.estacion_servicio_id) {
           payload.estacion_servicio = form.estacion_servicio_id;
         }
 
         const res = await usersService.crear(payload);
         setModalForm(false);
-        setPassVisible(false);
         setModalPassword({
+          titulo:   "Usuario creado",
           email:    res.email,
           password: res.password_temporal,
         });
@@ -341,17 +333,45 @@ export default function GestionUsuarios() {
     setCambiandoEstado(u.id);
     try {
       await usersService.cambiarEstado(u.id, nuevo);
-      flash("success", `Estado cambiado a ${nuevo}.`);
+      flash("success", `Estado cambiado a ${ESTADOS_CUENTA[nuevo]?.label ?? nuevo}.`);
       await cargar();
     } catch {
       flash("error", "Error al cambiar el estado.");
     } finally { setCambiandoEstado(null); }
   };
 
-  const copiarPassword = () => {
-    if (!modalPassword) return;
-    navigator.clipboard.writeText(modalPassword.password);
-    flash("success", "Contraseña copiada al portapapeles.");
+  // ------------------------------------------------
+  // RESETEAR CONTRASEÑA
+  // ------------------------------------------------
+
+  const resetearPassword = async () => {
+    if (!confirmarReset) return;
+    setReseteando(true);
+    setErrorReset("");
+    try {
+      const res = await usersService.resetearPassword(confirmarReset.id);
+      setConfirmarReset(null);
+      // No hace falta recargar el listado: el reset solo toca password
+      // y requiere_cambio_password, ninguno de los dos se muestra en la tabla.
+      setModalPassword({
+        titulo:   "Contraseña reseteada",
+        email:    res.email,
+        password: res.password_temporal,
+      });
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: unknown } };
+      const d = e.response?.data;
+      let msg = "Error al resetear la contraseña.";
+      if (typeof d === "string") {
+        msg = d;
+      } else if (d && typeof d === "object") {
+        const detail = (d as Record<string, unknown>).detail;
+        if (typeof detail === "string") msg = detail;
+      }
+      setErrorReset(msg);
+    } finally {
+      setReseteando(false);
+    }
   };
 
   const inputCls = "w-full px-4 py-2.5 rounded-xl border border-border text-sm bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card outline-none";
@@ -415,7 +435,10 @@ export default function GestionUsuarios() {
             </form>
             <select value={estadoCuenta} onChange={e => setEstadoCuenta(e.target.value as EstadoCuenta | "")}
               className="px-3 py-2.5 rounded-xl border border-border text-sm bg-input outline-none focus:border-primary focus:ring-2 focus:ring-primary/20">
-              {ESTADOS_CUENTA.map(e => <option key={e.value} value={e.value}>{e.label}</option>)}
+              <option value="">Todos los estados</option>
+              {Object.entries(ESTADOS_CUENTA).map(([value, { label }]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
             </select>
           </div>
 
@@ -459,14 +482,20 @@ export default function GestionUsuarios() {
                           <p className="text-xs text-muted-foreground mt-0.5">{subtexto}</p>
                         </td>
                         <td className="px-4 py-3">
-                          <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${rolColor[u.tipo_usuario] ?? "bg-background text-muted-foreground"}`}>
-                            {u.tipo_usuario}
-                          </span>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${rolColor[u.tipo_usuario] ?? "bg-background text-muted-foreground"}`}>
+                              {u.tipo_usuario}
+                            </span>
+                            {u.tipo_usuario === "ESS" && !u.perfil?.estacion_nombre && (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full bg-state-warning-bg text-state-warning-fg">
+                                <AlertTriangle className="w-3 h-3" />
+                                Sin estación
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="px-4 py-3">
-                          <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${estadoColor[u.estado_cuenta] ?? "bg-background text-muted-foreground"}`}>
-                            {u.estado_cuenta.replace("_", " ")}
-                          </span>
+                          <EstadoCuentaBadge estado={u.estado_cuenta} />
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex gap-1 justify-end flex-wrap">
@@ -475,13 +504,19 @@ export default function GestionUsuarios() {
                             )}
                             {u.estado_cuenta === "ACTIVO" ? (
                               <Button variant="ghost" size="sm" icon={<UserX className="w-3.5 h-3.5" />}
-                                loading={cambiandoEstado === u.id} onClick={() => cambiarEstado(u, "INACTIVO")}>
-                                <span className="sr-only">Desactivar</span>
+                                loading={cambiandoEstado === u.id} onClick={() => cambiarEstado(u, "SUSPENDIDO")}>
+                                <span className="sr-only">Suspender</span>
                               </Button>
                             ) : (
                               <Button variant="ghost" size="sm" icon={<UserCheck className="w-3.5 h-3.5" />}
                                 loading={cambiandoEstado === u.id} onClick={() => cambiarEstado(u, "ACTIVO")}>
                                 <span className="sr-only">Activar</span>
+                              </Button>
+                            )}
+                            {u.tipo_usuario !== "CONSUMIDOR" && u.id !== adminActual?.id && (
+                              <Button variant="ghost" size="sm" icon={<KeyRound className="w-3.5 h-3.5" />}
+                                onClick={() => { setErrorReset(""); setConfirmarReset(u); }}>
+                                <span className="sr-only">Resetear contraseña</span>
                               </Button>
                             )}
                           </div>
@@ -509,7 +544,7 @@ export default function GestionUsuarios() {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-medium text-muted-foreground mb-1">Email *</label>
-              <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
+              <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value.toLowerCase() }))}
                 disabled={!!editando} className={inputCls + (editando ? " opacity-60" : "")} />
             </div>
             <div>
@@ -582,10 +617,11 @@ export default function GestionUsuarios() {
           {form.tipo_usuario === "ESS" && (
             <div className="border border-border rounded-xl p-4 bg-background/50 space-y-3">
               <p className="text-xs font-medium text-foreground">
-                {editando ? "Cambiar estación asignada (opcional)" : "Estación asignada *"}
+                Estación asignada (opcional)
               </p>
               <p className="text-xs text-muted-foreground">
                 Selecciona el departamento, provincia y municipio para filtrar estaciones activas.
+                Un ESS puede quedar sin estación hasta que se le asigne una.
               </p>
 
               <div className="grid grid-cols-3 gap-3">
@@ -615,14 +651,14 @@ export default function GestionUsuarios() {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-muted-foreground mb-1">Estación {!editando && "*"}</label>
+                <label className="block text-xs font-medium text-muted-foreground mb-1">Estación</label>
                 <select value={form.estacion_servicio_id} onChange={e => setForm(f => ({ ...f, estacion_servicio_id: Number(e.target.value) }))}
                   disabled={!form.municipio_id || loadCatalogo} className={inputCls + " disabled:opacity-50"}>
                   <option value={0}>
-                    {!form.municipio_id ? "Selecciona primero el municipio"
+                    {!form.municipio_id ? "Sin asignar"
                       : loadCatalogo ? "Cargando..."
                       : estaciones.length === 0 ? "Sin estaciones activas en este municipio"
-                      : "Seleccionar estación..."}
+                      : "Sin asignar"}
                   </option>
                   {estaciones.map(e => <option key={e.id} value={e.id}>{e.nombre}</option>)}
                 </select>
@@ -644,42 +680,47 @@ export default function GestionUsuarios() {
         </div>
       </Modal>
 
-      {/* MODAL CONTRASEÑA PROVISIONAL (solo al crear) */}
-      <Modal open={!!modalPassword} onClose={() => setModalPassword(null)}
-        title="Usuario creado" size="md">
-        {modalPassword && (
+      {/* MODAL CONTRASEÑA PROVISIONAL (al crear o al resetear) */}
+      <MostrarPasswordModal
+        key={modalPassword?.password ?? "sin-password"}
+        open={!!modalPassword}
+        onClose={() => setModalPassword(null)}
+        titulo={modalPassword?.titulo ?? ""}
+        email={modalPassword?.email ?? ""}
+        password={modalPassword?.password ?? ""}
+      />
+
+      {/* MODAL CONFIRMACIÓN — RESETEAR CONTRASEÑA */}
+      <Modal open={!!confirmarReset} onClose={() => { if (!reseteando) setConfirmarReset(null); }}
+        title="Resetear contraseña" size="sm">
+        {confirmarReset && (
           <div className="space-y-4">
-            <Alert type="warning" message="Guarda esta contraseña. Solo se muestra una vez y no podrás verla de nuevo." />
+            {errorReset && <Alert type="error" message={errorReset} />}
 
-            <div>
-              <p className="text-xs text-muted-foreground mb-1">Email</p>
-              <p className="text-sm font-medium text-foreground">{modalPassword.email}</p>
+            <p className="text-sm text-foreground">
+              ¿Resetear la contraseña de <strong>{confirmarReset.nombre_completo}</strong> ({confirmarReset.email})?
+            </p>
+
+            <div className="flex items-start gap-2 text-xs text-muted-foreground bg-background rounded-xl p-3 border border-border">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-state-warning-fg" />
+              <span>
+                Se generará una contraseña provisional que el usuario deberá cambiar
+                al volver a ingresar.
+                <br /><br />
+                Se cerrarán las sesiones del usuario. Una sesión ya abierta puede
+                seguir activa hasta 30 minutos. Si necesitas cortar el acceso de
+                inmediato, suspendé la cuenta.
+              </span>
             </div>
 
-            <div>
-              <p className="text-xs text-muted-foreground mb-1">Contraseña provisional</p>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <input readOnly type={passVisible ? "text" : "password"} value={modalPassword.password}
-                    className={inputCls + " font-mono pr-10"} />
-                  <button onClick={() => setPassVisible(v => !v)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
-                    {passVisible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-                <Button variant="outline" icon={<Copy className="w-4 h-4" />} onClick={copiarPassword}>
-                  Copiar
-                </Button>
-              </div>
-            </div>
-
-            <div className="flex items-start gap-2 text-xs text-muted-foreground">
-              <Info className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>El usuario deberá cambiar esta contraseña al iniciar sesión por primera vez.</span>
-            </div>
-
-            <div className="flex justify-end pt-2">
-              <Button variant="primary" onClick={() => setModalPassword(null)}>Entendido, cerrar</Button>
+            <div className="flex justify-end gap-3 pt-1">
+              <Button variant="outline" disabled={reseteando} onClick={() => setConfirmarReset(null)}>
+                Cancelar
+              </Button>
+              <Button variant="danger" icon={<KeyRound className="w-4 h-4" />}
+                loading={reseteando} onClick={resetearPassword}>
+                Resetear contraseña
+              </Button>
             </div>
           </div>
         )}

@@ -128,9 +128,94 @@ The `state-*` pairs exist specifically for status badges (`EstadoBadge.tsx`, `St
 
 ## Current work
 
-Branch `feature/rediseno-ess`. In progress: ESS role redesign.
-Done: dispatch view (`pages/estacion/Solicitudes.tsx`).
-Next: dispatch history page, ESS profile page with password change.
+Branch `feature/rediseno-ess` — ESS role redesign, plus a pass on
+ANH/ADMIN panels and shared password/reset flows. Not yet merged
+to `main`; working tree has uncommitted changes on top of the
+last commit (`b19f59f`, "Historial de despachos ESS + limpieza de
+tokens de color").
 
-Known issues tracked separately — ask before assuming something
-is a bug vs. intentional.
+Done:
+- ESS dispatch view (`pages/estacion/Solicitudes.tsx`) and
+  dispatch history page (`pages/estacion/Historial.tsx`).
+- ANH/ADMIN panel redesign (`pages/anh/*`,
+  `pages/admin/GestionUsuarios.tsx`) and admin-driven consumer
+  registration (`pages/admin/RegistrarConsumidor.tsx`).
+- Password reset/change flow: `CambiarPasswordModal.tsx` +
+  `MostrarPasswordModal.tsx` (shows a one-time temporary
+  password), `pages/CambiarPasswordObligatorio.tsx` (forced
+  change on first login), `pages/MiPerfilFuncionario.tsx`
+  (profile page for ANH/ADMIN/ESS users with password change —
+  covers the "ESS profile page" item from the original plan).
+- Solicitud lifecycle: dispatch/reject services updated
+  (`despachar_solicitud.py`, `rechazar_solicitud.py`), new
+  `expirar_solicitudes.py` service replacing the old
+  `solicitudes/cron.py` (deleted — logic moved into the service +
+  the existing `expirar_solicitudes` management command),
+  `observacion_despacho` migration (0006) for recording dispatch
+  observations.
+- Case-insensitive email uniqueness for users (migration 0002 in
+  `users/`).
+
+Not yet committed / in progress — review before committing:
+- Backend changes across `solicitudes`, `users`, `consumidores`,
+  `estaciones` (see `git status` for the full list) don't have a
+  commit yet.
+- `backend/users/management/` is new and untracked — check its
+  contents are intentional before adding.
+
+Next:
+- Audit timeline for `pages/anh/DetalleSolicitud.tsx` — show
+  `AuditoriaEstadoSolicitud` history (despachar/rechazar/cancelar/
+  expirar) reusing `EstadoBadge`/`ESTADOS_SOLICITUD`; open question
+  on whether to surface `ip_address`.
+- Work through the Known issues list below.
+
+## Known issues
+
+### Alta prioridad
+- **Reportes: rango de fechas inválido.** El filtro "desde/hasta"
+  en Reportes permite `desde > hasta` y deja descargar archivos
+  vacíos sin avisar. Falta validar el rango antes de pedir el
+  reporte (`services/reportes.service.ts`,
+  `solicitudes/views_reportes.py`).
+- **Manejo de errores de red silencioso.** Varias pantallas
+  atrapan errores de fetch con `.catch(() => {})` y quedan con
+  selects/listas vacías sin ningún mensaje al usuario. Reemplazar
+  por el patrón `flash()` de error en cada pantalla afectada
+  (identificar todas al auditar, no solo una).
+- **Flujo de reset de contraseña muestra la contraseña en texto
+  plano.** Hoy el admin ve la contraseña temporal del usuario en
+  pantalla (`MostrarPasswordModal.tsx`). Evaluar alternativas
+  (envío directo por email, link de set-password de un solo uso,
+  etc.) antes de que esto llegue a producción.
+- **Servicio de correo (Brevo) sin configurar.** Bloquea
+  verificación de email y recuperación de contraseña en
+  producción — `users/email_service.py` usa el backend de consola
+  en dev; falta la configuración real de Brevo (API key, remitente
+  verificado) para producción.
+
+### Media prioridad
+- **Presentación de datos en reportes PDF/Excel** necesita mejoras
+  (formato, layout) — sin detalle todavía de qué específicamente,
+  revisar con el usuario.
+- **Expiración de solicitudes por tiempo no probada.** La lógica
+  vive ahora en `solicitudes/services/expirar_solicitudes.py`
+  (reemplazó `cron.py`) — falta probarla end-to-end (cron manual
+  vía `runcrons` o el management command).
+
+### Baja prioridad
+- **Ajustes de responsive en móvil** — pendientes, menores.
+
+Known issues tracked here going forward — ask before assuming
+something is a bug vs. intentional if it's not on this list.
+
+## Deuda técnica
+
+Subcomponentes definidos dentro del cuerpo de renderizado de un
+componente padre (en vez de como componentes de nivel superior) —
+evitar este patrón en código nuevo, y corregir oportunistamente en
+estos archivos cuando se los toque:
+
+- `frontend/src/pages/estacion/Solicitudes.tsx`
+- `frontend/src/pages/estacion/Historial.tsx`
+- `frontend/src/pages/anh/Dashboard.tsx`

@@ -301,7 +301,7 @@ export default function RegistrarConsumidor() {
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-muted-foreground mb-1">Email *</label>
-                    <input type="email" {...register("email")} className={inputCls} />
+                    <input type="email" {...register("email", { onChange: e => { e.target.value = e.target.value.toLowerCase(); } })} className={inputCls} />
                     {errors.email && <p className={errorCls}>{errors.email.message}</p>}
                   </div>
                   <div>

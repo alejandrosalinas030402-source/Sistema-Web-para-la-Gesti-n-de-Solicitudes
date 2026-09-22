@@ -1,6 +1,6 @@
 // src/components/ProtectedRoute.tsx
 
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import type { ReactNode } from "react";
 
@@ -9,8 +9,11 @@ interface Props {
   allowedRoles?: string[];
 }
 
+const RUTA_CAMBIO_OBLIGATORIO = "/cambiar-password-obligatorio";
+
 export default function ProtectedRoute({ children, allowedRoles }: Props) {
   const { user, loading, isAuthenticated } = useAuth();
+  const location = useLocation();
 
   if (loading) {
     return (
@@ -24,6 +27,16 @@ export default function ProtectedRoute({ children, allowedRoles }: Props) {
   }
 
   if (!isAuthenticated) return <Navigate to="/login" replace />;
+
+  // Contraseña generada por un admin: bloquea cualquier ruta protegida
+  // (no solo "/") hasta que el usuario elija una nueva. Va antes del
+  // chequeo de rol porque aplica a los cuatro tipos de usuario por igual.
+  if (user?.requiere_cambio_password && location.pathname !== RUTA_CAMBIO_OBLIGATORIO) {
+    return <Navigate to={RUTA_CAMBIO_OBLIGATORIO} replace />;
+  }
+  if (!user?.requiere_cambio_password && location.pathname === RUTA_CAMBIO_OBLIGATORIO) {
+    return <Navigate to="/" replace />;
+  }
 
   if (allowedRoles && user && !allowedRoles.includes(user.tipo_usuario)) {
     return <Navigate to="/unauthorized" replace />;

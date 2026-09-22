@@ -1,5 +1,7 @@
 # apps/consumidores/views.py
 
+import logging
+
 from rest_framework import mixins, viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -9,8 +11,12 @@ from rest_framework.views import APIView
 
 from django.db import transaction
 from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
 
 from users.permissions import IsAdminOrANH, IsConsumidor
+from users.serializers_admin import _generar_password_temporal
+
+logger = logging.getLogger(__name__)
 
 from .models import ConsumidorPerfil, DocumentoIdentidad
 from .serializers import (
@@ -283,5 +289,70 @@ class ConsumidorPerfilViewSet(
 
         return Response(
             ConsumidorPerfilSerializer(perfil).data,
+            status=status.HTTP_200_OK
+        )
+
+    # ------------------------------------------------
+    # RESETEAR CONTRASEÑA (ADMIN/ANH)
+    # ------------------------------------------------
+
+    @action(detail=True, methods=["post"], url_path="resetear-password")
+    def resetear_password(self, request, pk=None):
+        """
+        Resetea la contraseña de un consumidor cuando la olvidó y el
+        flujo público de recuperación por email no es una opción
+        (Brevo aún no está configurado en producción). Equivalente a
+        FuncionarioResetearPasswordView, pero sobre ConsumidorPerfil:
+        acá {pk} es el id del perfil, no del User, así que se opera
+        sobre perfil.user.
+
+        Sin restricción de auto-reset ni de ADMIN-only: el target acá
+        siempre es un ConsumidorPerfil, nunca puede coincidir con la
+        cuenta ANH/ADMIN que hace la request, y no hay riesgo de
+        escalación de privilegios (un consumidor no tiene privilegios
+        que escalar) — por eso alcanza con el IsAdminOrANH que ya
+        gatea todo el viewset, a diferencia del ADMIN-only que usa la
+        vía de funcionarios.
+
+        No bloquea el reset si el consumidor tiene
+        alerta_repetitividad=BLOQUEADO: ese bloqueo no impide el login
+        (LoginSerializer no lo chequea, solo lo hace
+        aprobar_solicitud()), así que resetear la contraseña no le
+        devuelve ningún acceso que no tuviera ya. El frontend advierte
+        igual sobre esto en el modal de confirmación.
+        """
+
+        perfil  = self.get_object()
+        usuario = perfil.user
+
+        password_temporal = _generar_password_temporal()
+        usuario.set_password(password_temporal)
+        usuario.requiere_cambio_password = True
+        usuario.save(update_fields=["password", "requiere_cambio_password"])
+
+        # Cierra las sesiones activas del usuario blacklisteando todos sus
+        # refresh tokens outstanding. LIMITACIÓN CONOCIDA Y ACEPTADA (misma
+        # que en FuncionarioResetearPasswordView): no revoca el access
+        # token que el usuario ya tenga en memoria, que sigue siendo
+        # válido hasta su propia expiración (máx. 30 min).
+        for token in OutstandingToken.objects.filter(user=usuario):
+            BlacklistedToken.objects.get_or_create(token=token)
+
+        logger.warning(
+            "Reset de contraseña: %s %s (id=%s) reseteó a consumidor %s (id=%s)",
+            request.user.tipo_usuario, request.user.email, request.user.id,
+            usuario.email, usuario.id,
+        )
+
+        return Response(
+            {
+                "detail":            "Contraseña reseteada correctamente.",
+                "email":             usuario.email,
+                "password_temporal": password_temporal,
+                "aviso": (
+                    "Comparte esta contraseña con el consumidor. Deberá "
+                    "cambiarla al iniciar sesión."
+                ),
+            },
             status=status.HTTP_200_OK
         )

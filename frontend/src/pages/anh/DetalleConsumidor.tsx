@@ -8,13 +8,15 @@ import { Button } from "../../components/ui/Button";
 import { Alert } from "../../components/ui/Alert";
 import { Spinner } from "../../components/ui/Spinner";
 import { EstadoIdentidadBadge, AlertaBadge } from "../../components/ui/EstadoBadge";
+import { MostrarPasswordModal } from "../../components/ui/MostrarPasswordModal";
+import { Modal } from "../../components/ui/Modal";
 import { consumidoresService } from "../../services/consumidores.service";
 import type { ConsumidorPerfil } from "../../types/consumidor.types";
 import { ACTIVIDADES } from "../../utils/constants";
 import { formatFecha } from "../../utils/format";
 import {
   ArrowLeft, User, MapPin, Shield,
-  FileImage, AlertCircle, CheckCircle, ShieldAlert, ShieldOff,
+  FileImage, AlertCircle, CheckCircle, ShieldAlert, ShieldOff, KeyRound,
 } from "lucide-react";
 
 const ALERT_TIMEOUT = 4000;
@@ -54,6 +56,12 @@ export default function DetalleConsumidor() {
 
   const [accionAlerta, setAccionAlerta] = useState<string | null>(null);
   const [motivoAlerta, setMotivoAlerta] = useState("");
+
+  // Reset de contraseña
+  const [confirmarReset, setConfirmarReset] = useState(false);
+  const [reseteando,     setReseteando]     = useState(false);
+  const [errorReset,     setErrorReset]     = useState("");
+  const [modalPassword,  setModalPassword]  = useState<{ email: string; password: string } | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -95,6 +103,24 @@ export default function DetalleConsumidor() {
     } catch {
       flash("error", "Error al cambiar la alerta.");
     } finally { setProcesando(false); }
+  };
+
+  const resetearPassword = async () => {
+    if (!perfil) return;
+    setReseteando(true);
+    setErrorReset("");
+    try {
+      const res = await consumidoresService.resetearPassword(perfil.id);
+      setConfirmarReset(false);
+      // No hace falta recargar el perfil: el reset no toca ningún
+      // campo que se muestre en esta pantalla.
+      setModalPassword({ email: res.email, password: res.password_temporal });
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { detail?: string } } };
+      setErrorReset(e.response?.data?.detail ?? "Error al resetear la contraseña.");
+    } finally {
+      setReseteando(false);
+    }
   };
 
   const textareaCls = "w-full px-4 py-2.5 rounded-xl border border-border text-sm bg-input focus:border-primary focus:ring-2 focus:ring-primary/20 focus:bg-card outline-none resize-none";
@@ -344,6 +370,33 @@ export default function DetalleConsumidor() {
           </CardBody>
         </Card>
 
+        {/* ACCIONES DE CUENTA */}
+        <Card>
+          <CardHeader>
+            <h2 className="font-semibold text-foreground flex items-center gap-2">
+              <KeyRound className="w-4 h-4 text-primary" />
+              Acciones de cuenta
+            </h2>
+          </CardHeader>
+          <CardBody>
+            <div className="flex items-center justify-between gap-4 flex-wrap">
+              <div>
+                <p className="text-sm font-medium text-foreground">Contraseña</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Resetea la contraseña si el consumidor no puede ingresar y olvidó su clave.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                icon={<KeyRound className="w-4 h-4" />}
+                onClick={() => { setErrorReset(""); setConfirmarReset(true); }}
+              >
+                Resetear contraseña
+              </Button>
+            </div>
+          </CardBody>
+        </Card>
+
         {/* DOCUMENTOS */}
         {perfil.documentos.length > 0 && (
           <Card>
@@ -377,6 +430,62 @@ export default function DetalleConsumidor() {
           </Card>
         )}
       </div>
+
+      {/* MODAL CONFIRMACIÓN — RESETEAR CONTRASEÑA */}
+      <Modal open={confirmarReset} onClose={() => { if (!reseteando) setConfirmarReset(false); }}
+        title="Resetear contraseña" size="sm">
+        <div className="space-y-4">
+          {errorReset && <Alert type="error" message={errorReset} />}
+
+          <p className="text-sm text-foreground">
+            ¿Resetear la contraseña de{" "}
+            <strong>{perfil.user.nombres} {perfil.user.apellido_paterno}</strong> ({perfil.user.email})?
+          </p>
+
+          <div className="flex items-start gap-2 text-xs text-muted-foreground bg-background rounded-xl p-3 border border-border">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-state-warning-fg" />
+            <span>
+              Se generará una contraseña provisional que el consumidor deberá cambiar
+              al volver a ingresar.
+              <br /><br />
+              Se cerrarán las sesiones del usuario. Una sesión ya abierta puede
+              seguir activa hasta 30 minutos.
+            </span>
+          </div>
+
+          {perfil.alerta_repetitividad === "BLOQUEADO" && (
+            <div className="flex items-start gap-2 text-xs text-state-warning-fg bg-state-warning-bg rounded-xl p-3">
+              <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>
+                Este consumidor está bloqueado por repetitividad. Resetear la
+                contraseña no levanta ese bloqueo — sus solicitudes seguirán
+                rechazándose hasta que se resuelva la alerta. Solo le restaura
+                el acceso para iniciar sesión.
+              </span>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-3 pt-1">
+            <Button variant="outline" disabled={reseteando} onClick={() => setConfirmarReset(false)}>
+              Cancelar
+            </Button>
+            <Button variant="danger" icon={<KeyRound className="w-4 h-4" />}
+              loading={reseteando} onClick={resetearPassword}>
+              Resetear contraseña
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* MODAL CONTRASEÑA PROVISIONAL */}
+      <MostrarPasswordModal
+        key={modalPassword?.password ?? "sin-password"}
+        open={!!modalPassword}
+        onClose={() => setModalPassword(null)}
+        titulo="Contraseña reseteada"
+        email={modalPassword?.email ?? ""}
+        password={modalPassword?.password ?? ""}
+      />
     </Layout>
   );
 }

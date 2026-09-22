@@ -1,5 +1,6 @@
 # apps/users/views.py
 import os
+import logging
 from django.db import transaction, IntegrityError
 from django.utils import timezone
 from django.conf import settings
@@ -11,11 +12,14 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import status
 
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
 
 from rest_framework.parsers import MultiPartParser, FormParser
-from .serializers_admin import RegistroConsumidorPorAdminSerializer
+from .serializers_admin import RegistroConsumidorPorAdminSerializer, _generar_password_temporal
 
 from .models import User, TokenVerificacion
+
+logger = logging.getLogger(__name__)
 from .services import crear_token_verificacion
 from .email_service import (
     enviar_pin_verificacion,
@@ -29,6 +33,7 @@ from .serializers import (
     SolicitarRecuperacionSerializer,
     RecuperarPasswordSerializer,
     CambiarPasswordSerializer,
+    CambiarPasswordObligatorioSerializer,
     UserSerializer,
 )
 
@@ -200,10 +205,21 @@ class LoginView(APIView):
         )
 
         if not serializer.is_valid():
-            # Registrar intento fallido si el usuario existe
-            email = request.data.get("email", "")
+            # Registrar intento fallido si el usuario existe.
+            # CRÍTICO: sin normalizar+iexact acá, esto es un bypass
+            # completo del bloqueo por fuerza bruta. LoginSerializer
+            # normaliza el email antes de autenticar, así que el login
+            # se resuelve igual contra el usuario correcto — pero como
+            # este lookup usaba el valor crudo con match exacto, un
+            # atacante que varía las mayúsculas del email en cada
+            # intento (Admin@x.com, ADMIN@x.com, aDmIn@x.com...) nunca
+            # encontraba al usuario acá, intentos_fallidos nunca subía,
+            # y la cuenta nunca se bloqueaba, sin importar cuántas
+            # contraseñas se probaran. Encontrado en la auditoría de
+            # 2026-09, no reportado originalmente.
+            email = request.data.get("email", "").lower().strip()
             try:
-                user = User.objects.get(email=email)
+                user = User.objects.get(email__iexact=email)
                 from configuracion.models import ConfiguracionSistema
                 config = ConfiguracionSistema.obtener()
 
@@ -236,12 +252,20 @@ class LoginView(APIView):
         refresh = RefreshToken.for_user(user)
         access  = str(refresh.access_token)
 
+        # authenticate() no aplica select_related: se vuelve a traer con
+        # el perfil precargado para que UserSerializer no dispare una
+        # query extra al resolver perfil_funcionario (mismo caso que
+        # MiPerfilView).
+        user_completo = User.objects.select_related(
+            "perfil_funcionario__estacion_servicio"
+        ).get(pk=user.pk)
+
         # IMPORTANTE: enviar access en el body para que el frontend
         # lo use como Authorization Bearer si las cookies fallan
         response = Response(
             {
                 "detail": "Login exitoso.",
-                "user": UserSerializer(user).data,
+                "user": UserSerializer(user_completo).data,
                 "access": access,
             },
             status=status.HTTP_200_OK
@@ -386,7 +410,7 @@ class SolicitarRecuperacionView(APIView):
         email = serializer.validated_data["email"]
 
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email__iexact=email)
 
             # Generar token de recuperación
             # (invalida anteriores internamente)
@@ -454,8 +478,9 @@ class RecuperarPasswordView(APIView):
 class CambiarPasswordView(APIView):
     """
     Permite al usuario autenticado cambiar su contraseña
-    conociendo la actual. También usado cuando
-    requiere_cambio_password=True.
+    conociendo la actual. Para el caso requiere_cambio_password=True
+    (contraseña generada por un admin) usar CambiarPasswordObligatorioView,
+    que no exige la contraseña actual.
     """
 
     permission_classes = [IsAuthenticated]
@@ -487,6 +512,46 @@ class CambiarPasswordView(APIView):
         return response
 
 
+class CambiarPasswordObligatorioView(APIView):
+    """
+    Cambio de contraseña forzado cuando requiere_cambio_password=True
+    (contraseña generada por un admin: alta de funcionario, registro
+    de consumidor por admin, o reset de contraseña). No exige la
+    contraseña actual porque el usuario acaba de autenticarse con
+    ella — pedírsela de nuevo es fricción sin valor de seguridad.
+
+    A diferencia de CambiarPasswordView, esta vista NO limpia las
+    cookies de sesión: SIMPLE_JWT no tiene CHECK_REVOKE_TOKEN activo,
+    así que la validez del access/refresh token no depende del hash
+    de la contraseña, y forzar un nuevo login inmediatamente después
+    de que el usuario acaba de iniciar sesión sería mala experiencia
+    sin beneficio real.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+
+        if not request.user.requiere_cambio_password:
+            return Response(
+                {"detail": "Esta cuenta no requiere cambio de contraseña obligatorio."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = CambiarPasswordObligatorioSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        user.set_password(serializer.validated_data["password_nuevo"])
+        user.requiere_cambio_password = False
+        user.save(update_fields=["password", "requiere_cambio_password"])
+
+        return Response(
+            {"detail": "Contraseña actualizada correctamente."},
+            status=status.HTTP_200_OK
+        )
+
+
 # ------------------------------------------------
 # REENVIAR PIN DE VERIFICACIÓN
 # ------------------------------------------------
@@ -510,7 +575,7 @@ class ReenviarPinView(APIView):
             )
 
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email__iexact=email)
         except User.DoesNotExist:
             return Response(
                 {"detail": "Si el correo está registrado y no verificado, recibirás un nuevo PIN."},
@@ -554,8 +619,14 @@ class MiPerfilView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # select_related evita una query extra para perfil_funcionario
+        # (UserSerializer la resuelve con hasattr/acceso lazy) en un
+        # endpoint que el frontend llama en casi cada carga de página.
+        user = User.objects.select_related(
+            "perfil_funcionario__estacion_servicio"
+        ).get(pk=request.user.pk)
         return Response(
-            UserSerializer(request.user).data,
+            UserSerializer(user).data,
             status=status.HTTP_200_OK
         )
 
@@ -780,6 +851,79 @@ class FuncionarioCambiarEstadoView(APIView):
             "detail": f"Estado cambiado a {nuevo_estado}.",
             "estado_cuenta": nuevo_estado,
         })
+
+
+class FuncionarioResetearPasswordView(APIView):
+    """
+    Resetea la contraseña de un funcionario (ADMIN/ANH/ESS) cuando
+    la olvidó y el flujo público de recuperación por email no es una
+    opción (Brevo aún no está configurado en producción).
+
+    Solo ADMIN puede usarlo, y no puede resetear su propia contraseña
+    por esta vía (para eso está el cambio normal con contraseña actual,
+    en CambiarPasswordView). Genera una contraseña temporal, fuerza
+    requiere_cambio_password y cierra las sesiones activas del usuario.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, user_id):
+        if request.user.tipo_usuario != "ADMIN":
+            return Response(
+                {"detail": "Solo el administrador puede resetear contraseñas."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if request.user.id == user_id:
+            return Response(
+                {
+                    "detail": (
+                        "No puedes resetear tu propia contraseña por esta vía. "
+                        "Usa el cambio de contraseña habitual."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            usuario = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({"detail": "No encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        password_temporal = _generar_password_temporal()
+        usuario.set_password(password_temporal)
+        usuario.requiere_cambio_password = True
+        usuario.save(update_fields=["password", "requiere_cambio_password"])
+
+        # Cierra las sesiones activas del usuario blacklisteando todos sus
+        # refresh tokens outstanding (mismo mecanismo que usa LogoutView
+        # para el token de la request actual, aplicado acá a todos los
+        # suyos). LIMITACIÓN CONOCIDA Y ACEPTADA: esto no revoca el access
+        # token que el usuario ya tenga en memoria — al no consultarse la
+        # blacklist en cada request autenticada, seguirá siendo válido
+        # hasta su propia expiración (máx. 30 min, ACCESS_TOKEN_LIFETIME).
+        # Es la misma ventana que ya existe hoy con el logout normal.
+        for token in OutstandingToken.objects.filter(user=usuario):
+            BlacklistedToken.objects.get_or_create(token=token)
+
+        # Acción sensible sobre la cuenta de otro usuario: sin un sistema
+        # de auditoría todavía, al menos queda registrada en los logs.
+        logger.warning(
+            "Reset de contraseña: admin %s (id=%s) reseteó a %s (id=%s)",
+            request.user.email, request.user.id, usuario.email, usuario.id,
+        )
+
+        return Response(
+            {
+                "detail":            "Contraseña reseteada correctamente.",
+                "email":             usuario.email,
+                "password_temporal": password_temporal,
+                "aviso": (
+                    "Comparte esta contraseña con el usuario. Deberá "
+                    "cambiarla al iniciar sesión."
+                ),
+            },
+            status=status.HTTP_200_OK
+        )
 
 
 # ------------------------------------------------

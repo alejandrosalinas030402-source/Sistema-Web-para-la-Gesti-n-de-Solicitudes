@@ -24,9 +24,10 @@ class UserSerializer(serializers.ModelSerializer):
     No expone datos sensibles.
     """
 
-    nombre_completo = serializers.SerializerMethodField()
-    municipio_id    = serializers.SerializerMethodField()
-    estacion_nombre = serializers.SerializerMethodField()
+    nombre_completo    = serializers.SerializerMethodField()
+    municipio_id       = serializers.SerializerMethodField()
+    estacion_nombre    = serializers.SerializerMethodField()
+    perfil_funcionario = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -40,9 +41,11 @@ class UserSerializer(serializers.ModelSerializer):
             "tipo_usuario",
             "estado_cuenta",
             "email_verificado",
+            "requiere_cambio_password",
             "date_joined",
             "municipio_id",
             "estacion_nombre",
+            "perfil_funcionario",
         ]
         read_only_fields = fields
 
@@ -72,6 +75,18 @@ class UserSerializer(serializers.ModelSerializer):
             and obj.perfil_funcionario.estacion_servicio
         ):
             return obj.perfil_funcionario.estacion_servicio.nombre
+        return None
+
+    def get_perfil_funcionario(self, obj):
+        """
+        Datos institucionales para ADMIN/ANH/ESS (cargo, documento,
+        N° de funcionario, etc). None para CONS, que no tiene
+        PerfilFuncionario. Requiere que la vista haga select_related
+        de "perfil_funcionario" para no disparar una query extra
+        por cada serialización (ver MiPerfilView y LoginView).
+        """
+        if hasattr(obj, "perfil_funcionario"):
+            return PerfilFuncionarioSerializer(obj.perfil_funcionario).data
         return None
 
 
@@ -173,7 +188,8 @@ class CrearFuncionarioSerializer(serializers.Serializer):
     # ------------------------------------------------
 
     def validate_email(self, value):
-        if User.objects.filter(email=value).exists():
+        value = value.lower().strip()
+        if User.objects.filter(email__iexact=value).exists():
             raise serializers.ValidationError(
                 "Ya existe un usuario registrado con este correo."
             )
@@ -197,13 +213,9 @@ class CrearFuncionarioSerializer(serializers.Serializer):
         tipo     = attrs.get("tipo_usuario")
         estacion = attrs.get("estacion_servicio")
 
-        # ESS debe tener estación asignada
-        if tipo == User.TipoUsuario.ESS and not estacion:
-            raise serializers.ValidationError({
-                "estacion_servicio": (
-                    "Un usuario ESS debe tener una estación de servicio asignada."
-                )
-            })
+        # ESS puede crearse sin estación asignada (queda aislado por
+        # get_queryset()/EsEstacionAsignada en solicitudes hasta que
+        # un admin le asigne una).
 
         # ADMIN y ANH no deben tener estación
         if tipo in [User.TipoUsuario.ADMIN, User.TipoUsuario.ANH] and estacion:
@@ -313,7 +325,7 @@ class RegistroConsumidorSerializer(serializers.Serializer):
 
     def validate_email(self, value):
         value = value.lower().strip()
-        if User.objects.filter(email=value).exists():
+        if User.objects.filter(email__iexact=value).exists():
             raise serializers.ValidationError(
                 "Ya existe una cuenta registrada con este correo."
             )
@@ -439,7 +451,7 @@ class LoginSerializer(serializers.Serializer):
         password = attrs.get("password")
 
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email__iexact=email)
         except User.DoesNotExist:
             raise serializers.ValidationError("Credenciales incorrectas.")
 
@@ -485,7 +497,7 @@ class VerificarEmailSerializer(serializers.Serializer):
         codigo_pin = attrs.get("codigo_pin")
 
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email__iexact=email)
         except User.DoesNotExist:
             raise serializers.ValidationError(
                 "No existe una cuenta con este correo."
@@ -525,7 +537,11 @@ class SolicitarRecuperacionSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
     def validate_email(self, value):
-        return value
+        # Sin esto, pedir la recuperación con el email en un case
+        # distinto al guardado no encontraba al usuario y el correo
+        # nunca se enviaba, en silencio (encontrado en la auditoría
+        # de 2026-09, no reportado originalmente).
+        return value.lower().strip()
 
 
 # ------------------------------------------------
@@ -610,4 +626,34 @@ class CambiarPasswordSerializer(serializers.Serializer):
                 )
             })
 
+        return attrs
+
+
+# ------------------------------------------------
+# CAMBIO DE CONTRASEÑA OBLIGATORIO
+# Usuario con requiere_cambio_password=True (contraseña generada
+# por un admin: alta de funcionario, registro de consumidor por
+# admin, o reset de contraseña). No pide la contraseña actual: el
+# usuario acaba de autenticarse con ella, volver a pedírsela es
+# fricción sin valor. La vista es la que verifica que el flag esté
+# activo antes de aceptar el cambio.
+# ------------------------------------------------
+
+class CambiarPasswordObligatorioSerializer(serializers.Serializer):
+
+    password_nuevo  = serializers.CharField(
+        write_only=True,
+        min_length=8,
+        style={"input_type": "password"}
+    )
+    password_nuevo2 = serializers.CharField(
+        write_only=True,
+        style={"input_type": "password"}
+    )
+
+    def validate(self, attrs):
+        if attrs["password_nuevo"] != attrs["password_nuevo2"]:
+            raise serializers.ValidationError({
+                "password_nuevo2": "Las contraseñas nuevas no coinciden."
+            })
         return attrs
